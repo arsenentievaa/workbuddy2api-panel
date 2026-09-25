@@ -523,7 +523,7 @@ func StreamHint(w http.ResponseWriter, r io.Reader, hintFn func(string) string) 
 			// code/msg/requestId。error.message 即上游原文（如 6004 限流、审核拦截），
 			// 计入有效帧（避免误判空流补写 "empty upstream stream"）。
 			if _, hasErr := obj["error"]; hasErr {
-				if werr := writeRaw(payload); werr != nil {
+				if werr := writeRaw(maskErrorFrame(payload)); werr != nil {
 					return 0, werr
 				}
 				return 1, nil
@@ -617,6 +617,27 @@ func frameGatewayHint(hintFn func(string) string, payload string) string {
 	// panic 隔离：hint 判定是补充功能，任何实现缺陷不得击穿流透传主路径。
 	defer func() { _ = recover() }()
 	return strings.TrimSpace(hintFn(payload))
+}
+
+// maskErrorFrame rewrites an upstream error frame so its error.message never
+// reveals the backend provider (model name, "insufficient balance", Chinese
+// text). The error kind is classified from the frame payload; the message is
+// replaced with a neutral one. Non-JSON / non-error frames are returned as-is.
+func maskErrorFrame(payload string) string {
+	var obj map[string]any
+	if json.Unmarshal([]byte(payload), &obj) != nil {
+		return payload
+	}
+	e, ok := obj["error"].(map[string]any)
+	if !ok {
+		return payload
+	}
+	e["message"] = MaskErrorMessage(FrameKind(payload))
+	out, err := json.Marshal(obj)
+	if err != nil {
+		return payload
+	}
+	return string(out)
 }
 
 // attachHintToErrorFrame 在 error 帧的 error 对象上附加 gateway_hint 字段。

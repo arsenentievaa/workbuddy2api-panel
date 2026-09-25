@@ -759,11 +759,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 				// 不再改写成网关固定文案——客户端必须看到真实错误才能排查。
 				h.applyErrorPolicy(acct.UID, kind, string(respBody), bareModel, uerr)
 				fail(acct.UID)
-				msg := string(respBody)
-				if strings.TrimSpace(msg) == "" {
-					// 空 body 兜底：无上游原文可透传，保留可读分类文案（不编造原文）。
-					msg = "content blocked by upstream content firewall"
-				}
+				msg := upstream.MaskErrorMessage(upstream.ErrContentBlocked)
 				writeOpenAIErrorHint(w, http.StatusBadRequest, "content_blocked", msg,
 					h.hintOf(upstream.ErrContentBlocked, string(respBody), bareModel, reqHasImage, uerr))
 				st.status = http.StatusBadRequest
@@ -778,7 +774,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			if kind == upstream.ErrPromptTooLong {
 				h.applyErrorPolicy(acct.UID, kind, string(respBody), bareModel, uerr)
 				fail(acct.UID)
-				writeOpenAIErrorHint(w, http.StatusBadRequest, "prompt_too_long", promptTooLongMessage(string(respBody)),
+				writeOpenAIErrorHint(w, http.StatusBadRequest, "prompt_too_long", upstream.MaskErrorMessage(upstream.ErrPromptTooLong),
 					h.hintOf(upstream.ErrPromptTooLong, string(respBody), bareModel, reqHasImage, uerr))
 				st.status = http.StatusBadRequest
 				return
@@ -788,10 +784,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			if kind == upstream.ErrImageInvalid {
 				h.applyErrorPolicy(acct.UID, kind, string(respBody), bareModel, uerr)
 				fail(acct.UID)
-				msg := string(respBody)
-				if strings.TrimSpace(msg) == "" {
-					msg = "image request was rejected by upstream"
-				}
+				msg := upstream.MaskErrorMessage(upstream.ErrImageInvalid)
 				writeOpenAIErrorHint(w, http.StatusBadRequest, "image_invalid", msg,
 					h.hintOf(upstream.ErrImageInvalid, string(respBody), bareModel, reqHasImage, uerr))
 				st.status = http.StatusBadRequest
@@ -887,8 +880,8 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	// 传输层抖动/非上游返回的 lastErr）→ 保留自有文案 no_healthy_account（本地错误
 	// 没有上游原文可透传，不编造）。
 	status := http.StatusServiceUnavailable
-	code := "no_healthy_account"
-	msg := "all accounts are temporarily unavailable, please retry later"
+	code := "service_unavailable"
+	msg := "the service is temporarily unavailable; please try again later"
 	// gateway_hint（末端透传）：上游错误按 Kind + 原文 + 请求形态判定；本地调度类
 	// 错误（无上游原文）固定 no_healthy_account hint。
 	hint := upstream.NoHealthyAccountHint()
@@ -909,10 +902,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 				msg = "waf ip-level block: upstream firewall is blocking the gateway IP, rotation stopped; retry after the block window expires"
 			}
 		}
-		if s := strings.TrimSpace(ue.Msg); s != "" {
-			// 上游原文优先：透传 code/msg/requestId，不拼接本地前缀。
-			msg = s
-		}
+		msg = upstream.MaskErrorMessage(ue.Kind)
 	}
 	writeOpenAIErrorHint(w, status, code, msg, hint)
 	st.status = status

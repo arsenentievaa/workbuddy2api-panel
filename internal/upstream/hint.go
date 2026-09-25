@@ -54,11 +54,11 @@ func GatewayHint(kind ErrKind, msg string, ctx HintContext) string {
 	case ErrSoftRate:
 		return "rate limited by upstream; retry after reset"
 	case ErrAccountFault:
-		return "account-level fault at upstream (auth/quota state); the gateway will rotate or disable this account"
+		return "the service is temporarily unavailable; please try again later"
 	case ErrSessionDead:
-		return "account session expired at upstream; the account is disabled until re-login"
+		return "the service is temporarily unavailable; please try again later"
 	case ErrHardCredit:
-		return "account credits exhausted at upstream; waiting for daily check-in to restore"
+		return "the service is temporarily unavailable; please try again later"
 	case ErrModelBlocked:
 		return "upstream has no such model on this backend; switch model or retry on another account"
 	case ErrContentBlocked:
@@ -82,7 +82,7 @@ type HintContext struct {
 
 // noHealthyHint 本地调度类错误（池中无健康号可用/传输层抖动，无上游原文可透传）
 // 的固定 hint。不进 GatewayHint：它没有 ErrKind，是网关自己的调度事实。
-const noHealthyHint = "no healthy account available in pool; check /status or retry later"
+const noHealthyHint = "the service is temporarily unavailable; please try again later"
 
 // NoHealthyAccountHint 本地调度错误的 gateway_hint（与 no_healthy_account code 配套）。
 func NoHealthyAccountHint() string { return noHealthyHint }

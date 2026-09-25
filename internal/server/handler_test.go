@@ -169,10 +169,9 @@ func TestChatBadParamsRotatesWithoutPenalty(t *testing.T) {
 	}
 }
 
-// TestChatAllBadParams503CarriesUpstreamBody 全部账号都 11101 时 503 文案必须包含
-// 上游原始 11101 信息（不再是空洞的 no_healthy_account）。
-// 现状即透传 lastErr.Error()（含上游 body），本测试把它锁定为回归。
-func TestChatAllBadParams503CarriesUpstreamBody(t *testing.T) {
+// TestChatAllBadParams503Masked 全部账号都 11101 时 503 文案必须为中性掩码，
+// 不得透传上游原始 11101 信息（防后端身份/参数细节泄漏）。
+func TestChatAllBadParams503Masked(t *testing.T) {
 	up := newFakeUpstream(t, func(authz string) (int, string, bool) {
 		return 400, `{"code":11101,"msg":"Unmarshal chat params failed with error: unexpected EOF"}`, false
 	})
@@ -184,8 +183,11 @@ func TestChatAllBadParams503CarriesUpstreamBody(t *testing.T) {
 		t.Fatalf("code=%d body=%s (want 503)", rec.Code, rec.Body)
 	}
 	body := rec.Body.String()
-	if !strings.Contains(body, "11101") || !strings.Contains(body, "Unmarshal chat params failed") {
-		t.Errorf("503 message should carry upstream 11101 info: %s", body)
+	if strings.Contains(body, "11101") || strings.Contains(body, "Unmarshal chat params failed") {
+		t.Errorf("503 message must NOT leak upstream 11101 info: %s", body)
+	}
+	if !strings.Contains(body, "invalid request parameters") {
+		t.Errorf("503 message should be the neutral masked message: %s", body)
 	}
 }
 
@@ -1406,10 +1408,13 @@ func TestContentBlockedCustomModeDoesNotDegrade(t *testing.T) {
 	if env.Error.Code != "content_blocked" {
 		t.Errorf("error.code=%q want content_blocked", env.Error.Code)
 	}
-	// 错误透传（error-passthrough，吸收上游 5755fe3）：message 装上游 body 原文
-	// （code/msg 原样），客户端必须看到真实错误才能排查；gateway_hint 并列补充。
-	if !strings.Contains(rec.Body.String(), "11128") {
-		t.Errorf("message should carry upstream original body (passthrough): %s", rec.Body.String())
+	// 错误掩码（error-masking）：message 不再透传上游 body 原文（防后端身份泄漏），
+	// 改用中性文案；gateway_hint 并列补充。
+	if strings.Contains(rec.Body.String(), "11128") {
+		t.Errorf("message must NOT leak the upstream original body: %s", rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "request content was rejected by the content policy") {
+		t.Errorf("message should be the neutral masked message: %s", rec.Body.String())
 	}
 	if !strings.Contains(rec.Body.String(), "gateway_hint") {
 		t.Errorf("content_blocked should carry gateway_hint: %s", rec.Body.String())

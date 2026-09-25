@@ -76,6 +76,27 @@ func (k ErrKind) String() string {
 	}
 }
 
+// MaskErrorMessage returns a client-safe message for an upstream error kind.
+// The raw upstream body may reveal the backend provider (model name,
+// "insufficient balance", Chinese text); it must never be forwarded to
+// clients. Messages are deliberately neutral and English.
+func MaskErrorMessage(kind ErrKind) string {
+	switch kind {
+	case ErrContentBlocked:
+		return "request content was rejected by the content policy"
+	case ErrPromptTooLong:
+		return "request context is too long"
+	case ErrImageInvalid:
+		return "image request was rejected"
+	case ErrBadParams:
+		return "invalid request parameters"
+	case ErrSoftRate:
+		return "rate limited; please wait a moment and try again"
+	default:
+		return "the service is temporarily unavailable; please try again later"
+	}
+}
+
 // Error 带分类的上游错误。
 type Error struct {
 	Kind   ErrKind
