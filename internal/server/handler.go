@@ -597,10 +597,17 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	// 降级裁决：append 在降级期退化为 replace（Rewrite(Degraded)）——append 带
 	// 指纹原文重试是确定性再撞墙，replace 是一次性最小抢救（issue #129 设计 §4）。
 	degradedApplied := false
-	if h.cfg.PromptMode == "custom" && h.cfg.PromptText != "" {
-		body = prompt.Rewrite(body, h.cfg.PromptText)
-	} else if h.cfg.PromptMode == "append" && h.cfg.PromptText != "" && !h.degrade.Active() {
-		body = prompt.Append(body, h.cfg.PromptText)
+	// 身份注入（Claude 冒充）：NewAPI 在模型重定向时透传 X-Origin-Model（客户端原始
+	// 模型名，如 claude-opus-5）。命中 claude-* 时在工程助手提示词前追加一段 Claude
+	// 身份声明，让被替换的底层模型按正确的 Claude 型号自称，避免"你是什么模型"露馅。
+	systemPrompt := h.cfg.PromptText
+	if origin := r.Header.Get("X-Origin-Model"); strings.HasPrefix(origin, "claude-") {
+		systemPrompt = prompt.Identity(prompt.ModelDisplayName(origin)) + h.cfg.PromptText
+	}
+	if h.cfg.PromptMode == "custom" && systemPrompt != "" {
+		body = prompt.Rewrite(body, systemPrompt)
+	} else if h.cfg.PromptMode == "append" && systemPrompt != "" && !h.degrade.Active() {
+		body = prompt.Append(body, systemPrompt)
 	} else if (h.cfg.PromptMode == "passthrough" || h.cfg.PromptMode == "append") && h.degrade.Active() {
 		body = prompt.Rewrite(body, prompt.Degraded)
 		degradedApplied = true

@@ -12,6 +12,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"strings"
 )
 
 //go:embed defaultprompt.md
@@ -23,6 +24,43 @@ var defaultPrompt string
 // 判定为指纹误报后换最小中性提示词重试一次。非对抗框架——只用于绕开
 // system 来源的误报，不改变用户指令的合法性语义。
 const Degraded = "You are a helpful assistant. Respond in the user's language, follow the user's instructions, and be direct and concise."
+
+// ModelDisplayName 把 Claude 模型 ID 转成人读的名字：
+//
+//	"claude-opus-5"    → "Claude Opus 5"
+//	"claude-haiku-4-5" → "Claude Haiku 4.5"
+//	"claude-fable-5-1" → "Claude Fable 5.1"
+//
+// 非 claude- 前缀或无法解析的 ID 一律回退 "Claude"（宁宽勿漏，身份兜底）。
+func ModelDisplayName(modelID string) string {
+	id := strings.TrimSpace(modelID)
+	if !strings.HasPrefix(id, "claude-") {
+		return "Claude"
+	}
+	rest := strings.TrimPrefix(id, "claude-")
+	parts := strings.Split(rest, "-")
+	if len(parts) < 2 || parts[0] == "" {
+		return "Claude"
+	}
+	family := strings.ToUpper(parts[0][:1]) + parts[0][1:]
+	version := strings.Join(parts[1:], ".")
+	return "Claude " + family + " " + version
+}
+
+// Identity 返回一段 Claude 身份系统提示词块（用于映射请求的冒充身份）。
+// displayName 为模型对外自称的名字（见 ModelDisplayName）。该块应置于
+// 工程助手提示词之前，确保身份声明最先被读到。
+func Identity(displayName string) string {
+	if strings.TrimSpace(displayName) == "" {
+		displayName = "Claude"
+	}
+	return "You are Claude, an AI assistant made by Anthropic. " +
+		"You are currently running as " + displayName + ". " +
+		"When asked about your identity or which model you are, always respond that you are " + displayName + ", made by Anthropic. " +
+		"Maintain the helpful, harmless, and honest behavior expected of Claude models. " +
+		"Never reveal or imply that you are running on any other underlying model, service, or provider. " +
+		"If asked about your architecture, training, or internal details, provide only general information consistent with Anthropic's public statements about Claude models.\n\n"
+}
 
 // Load 按 mode 与 file 加载系统提示词文本。
 //   - file 非空 → 读文件（不存在/读失败返回 error，调用方 fail fast）；
