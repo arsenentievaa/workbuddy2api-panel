@@ -45,35 +45,30 @@ func TestModelCooldownsIndependent(t *testing.T) {
 	}
 }
 
-// TestModelCooldownsBDoesNotOverwriteA 模型 B 触发 6004 后，A 的冷却截止不被覆盖：
-// 这是本 issue 的核心——旧实现用单 until 字段，B 会覆盖 A。
+// TestModelCooldownsBDoesNotOverwriteA 6004（带重置时间）现在是账户级软冷却：
+// 写 until（冻结所有模型），不再写 modelCooldowns。
 func TestModelCooldownsBDoesNotOverwriteA(t *testing.T) {
 	p := New("")
 	p.Add(&auth.Auth{UID: "u1"})
 	resetA := time.Now().Add(2 * time.Hour)
-	// 模拟真实路径两次 6004：A(2h) 然后 B(1h)。
 	p.CooldownSoftForModel("u1", 600*time.Second, resetA, "glm-5.3", "6004 model rate limit")
-	p.CooldownSoftForModel("u1", 600*time.Second, time.Now().Add(1*time.Hour), "hy3-x", "6004 model rate limit")
 
 	p.mu.RLock()
 	e := p.byUID["u1"]
-	mcA, okA := e.modelCooldowns["glm-5.3"]
 	until := e.until
+	n := len(e.modelCooldowns)
 	p.mu.RUnlock()
-	if !okA {
-		t.Fatalf("A(glm-5.3) 的模型冷却条目丢失（被 B 覆盖？）")
+	if until.IsZero() {
+		t.Fatalf("6004 应写账户级 until（冻结所有模型），但 until 为零值")
 	}
-	if d := mcA.Until.Sub(resetA); d < -time.Second || d > time.Second {
-		t.Errorf("A until=%v want ~%v（B 的冷却不得覆盖 A 的截止）", mcA.Until, resetA)
-	}
-	if !until.IsZero() {
-		t.Errorf("until=%v 应为零值（6004 从不写账号级 until）", until)
+	if n != 0 {
+		t.Errorf("6004 不应再写 modelCooldowns，got %d 条", n)
 	}
 }
 
-// TestCooldownSoftForModelDoesNotClobberUntil 带解析时间的 6004 不写 until
-// （否则全账号级冷却被模型重置时间污染），只写 modelCooldowns[model]。
-func TestCooldownSoftForModelDoesNotClobberUntil(t *testing.T) {
+// TestCooldownSoftForModelSetsUntil 带解析时间的 6004 现在写账户级 until
+// （冻结所有模型），不再写 modelCooldowns（无模型豁免）。
+func TestCooldownSoftForModelSetsUntil(t *testing.T) {
 	p := New("")
 	p.Add(&auth.Auth{UID: "u1"})
 	reset := time.Now().Add(30 * time.Minute)
@@ -81,41 +76,34 @@ func TestCooldownSoftForModelDoesNotClobberUntil(t *testing.T) {
 	p.mu.RLock()
 	e := p.byUID["u1"]
 	until := e.until
-	mc, ok := e.modelCooldowns["glm-5.3"]
+	_, ok := e.modelCooldowns["glm-5.3"]
 	p.mu.RUnlock()
-	if !until.IsZero() {
-		t.Errorf("until=%v 应零值（6004 不写 until）", until)
+	if until.IsZero() {
+		t.Errorf("6004 应写 until（账户级冻结），got 零值")
 	}
-	if !ok || mc.Until.IsZero() {
-		t.Errorf("modelCooldowns[glm-5.3]=%+v ok=%v，应已记录模型冷却", mc, ok)
+	if ok {
+		t.Errorf("6004 不应写 modelCooldowns（无模型豁免）")
 	}
 }
 
-// TestCooldownSoftForModelCapsUntilKeepsResetAt 6004 写 modelCooldowns：
-// until 截断到 soft_rate_max，reset_at 保留上游原始墙钟（issue #36 台账语义迁移）。
-func TestCooldownSoftForModelCapsUntilKeepsResetAt(t *testing.T) {
+// TestCooldownSoftForModelCapsUntil 6004 写账户级 until，截断到 soft_rate_max。
+func TestCooldownSoftForModelCapsUntil(t *testing.T) {
 	p := New("")
 	p.Add(&auth.Auth{UID: "u1"})
 	p.SetSoftRateMax(10 * time.Minute)
-	reset := time.Now().Add(2 * time.Hour) // 远超封顶 → until 截断到 10m，reset_at 保留 2h
+	reset := time.Now().Add(2 * time.Hour) // 远超封顶 → until 截断到 10m
+	before := time.Now()
 	p.CooldownSoftForModel("u1", 600*time.Second, reset, "glm-5.3", "6004 model rate limit")
 	p.mu.RLock()
-	mc, ok := p.byUID["u1"].modelCooldowns["glm-5.3"]
+	until := p.byUID["u1"].until
 	p.mu.RUnlock()
-	if !ok {
-		t.Fatal("modelCooldowns 缺少 glm-5.3")
-	}
-	if rem := mc.Until.Sub(time.Now()); rem <= 0 || rem > 10*time.Minute+time.Second {
-		t.Errorf("Until 应在 (0,10m] 区间，实际剩余 %v", rem)
-	}
-	if d := mc.ResetAt.Sub(reset); d < -time.Second || d > time.Second {
-		t.Errorf("ResetAt=%v want ~2h 后=%v", mc.ResetAt, reset)
+	if rem := until.Sub(before); rem <= 0 || rem > 10*time.Minute+time.Second {
+		t.Errorf("until 应在 (0,10m] 区间，实际剩余 %v", rem)
 	}
 }
 
-// TestHealthyForModelAfterModelSpecific6004 6004 只锁该模型：
-// 账号对触发模型不可选、对其他模型仍可选（issue #31 豁免保持）；账号级 healthy 仍真。
-func TestHealthyForModelAfterModelSpecific6004(t *testing.T) {
+// TestHealthyForModelAfter6004 6004（带重置时间）现在是账户级冷却：所有模型都不可选。
+func TestHealthyForModelAfter6004(t *testing.T) {
 	p := New("")
 	p.Add(&auth.Auth{UID: "u1"})
 	reset := time.Now().Add(30 * time.Minute)
@@ -128,11 +116,11 @@ func TestHealthyForModelAfterModelSpecific6004(t *testing.T) {
 	if e.healthyForModel(now, "glm-5.3") {
 		t.Fatal("触发模型 glm-5.3 应不可选")
 	}
-	if !e.healthyForModel(now, "hy3-x") {
-		t.Fatal("其他模型 hy3-x 应可选（模型豁免）")
+	if e.healthyForModel(now, "hy3-x") {
+		t.Fatal("其他模型 hy3-x 也不可选（6004 冻结账户，无模型豁免）")
 	}
-	if !e.healthy(now) {
-		t.Fatal("账号级 healthy 应仍 true（6004 只锁模型，不锁账号）")
+	if e.healthy(now) {
+		t.Fatal("账号级 healthy 应 false（6004 冻结账户）")
 	}
 }
 
@@ -163,22 +151,24 @@ func TestModelCooldownsTwoLimitsBothBlock(t *testing.T) {
 	}
 }
 
-// TestModelCooldownsPreservedByNoteSuccess 成功（NoteSuccess）不得清除模型级 6004 冷却：
-// 若清除，B 模型成功会抹掉 A 模型的独立冷却——正是本 issue 要修的核心缺陷。
-func TestModelCooldownsPreservedByNoteSuccess(t *testing.T) {
+// TestCooldownPreservedByNoteSuccess 6004（账户级冷却）在成功后不清 until
+// （NoteSuccess 只清 softStreak/熔断/连败，冷却截止由墙钟或签到决定）。
+func TestCooldownPreservedByNoteSuccess(t *testing.T) {
 	p := New("")
 	p.Add(&auth.Auth{UID: "u1"})
 	resetA := time.Now().Add(2 * time.Hour)
 	p.CooldownSoftForModel("u1", 600*time.Second, resetA, "glm-5.3", "6004 model rate limit")
-	p.NoteSuccess("u1") // 其他模型成功
+	p.NoteSuccess("u1")
 	p.mu.RLock()
-	mc, ok := p.byUID["u1"].modelCooldowns["glm-5.3"]
+	e := p.byUID["u1"]
+	until := e.until
+	n := len(e.modelCooldowns)
 	p.mu.RUnlock()
-	if !ok {
-		t.Fatalf("NoteSuccess 后 A(glm-5.3) 独立冷却被清除——模型独立性被破坏")
+	if until.IsZero() {
+		t.Errorf("NoteSuccess 不应清 until（冷却截止仍有效）")
 	}
-	if d := mc.Until.Sub(resetA); d < -time.Second || d > time.Second {
-		t.Errorf("A until=%v want ~%v（不得被 NoteSuccess 干扰）", mc.Until, resetA)
+	if n != 0 {
+		t.Errorf("6004 不应写 modelCooldowns，got %d", n)
 	}
 }
 
@@ -319,9 +309,8 @@ func TestRateLimitedModelsEachModelHasOwnUntil(t *testing.T) {
 	}
 }
 
-// TestModelCooldownsPickSkipsLimitedModel 被模型 X 6004 的账号，请求 X 时选到别的号，
-// 请求其他模型时可选到该号（模型豁免进入 normal 选号）。
-func TestModelCooldownsPickSkipsLimitedModel(t *testing.T) {
+// TestModelCooldownsPickSkipsFrozenAccount 6004 冻结账户：所有模型都跳过该号。
+func TestModelCooldownsPickSkipsFrozenAccount(t *testing.T) {
 	withNoPickGap(t)
 	p := New("")
 	p.Add(&auth.Auth{UID: "u1"})
@@ -333,19 +322,18 @@ func TestModelCooldownsPickSkipsLimitedModel(t *testing.T) {
 	if got := p.PickExcludingForModel(nil, "glm-5.3"); got == nil || got.UID != "u2" {
 		t.Fatalf("glm-5.3 请求应跳过 u1, got %+v", got)
 	}
-	if got := p.PickExcludingForModel(nil, "hy3-x"); got == nil || got.UID != "u1" {
-		t.Fatalf("hy3-x 请求应豁免 u1, got %+v", got)
+	if got := p.PickExcludingForModel(nil, "hy3-x"); got == nil || got.UID != "u2" {
+		t.Fatalf("hy3-x 请求也应跳过 u1（账户冻结，无豁免）, got %+v", got)
 	}
 }
 
-// TestServableNowModelCooldownStillServable 单模型 6004 限流不破坏探活（池还可服务），
-// 全账号冷却（until）则不可服务。
-func TestServableNowModelCooldownStillServable(t *testing.T) {
+// TestServableNow6004NotServable 6004 现在是账户级冷却 → 池不可服务。
+func TestServableNow6004NotServable(t *testing.T) {
 	p := New("")
 	p.Add(&auth.Auth{UID: "u1"})
 	p.CooldownSoftForModel("u1", time.Minute, time.Now().Add(5*time.Minute), "glm-5.3", "6004")
-	if !p.ServableNow() {
-		t.Fatal("6004 模型冷却不锁账号，ServableNow 应 true")
+	if p.ServableNow() {
+		t.Fatal("6004 冻结账户，ServableNow 应 false")
 	}
 }
 
@@ -456,8 +444,8 @@ func TestHealthyForModelAccountCooledAllowsNothingAfterUntil(t *testing.T) {
 	}
 }
 
-// TestHealthyForModelPriorityViaPick 端到端：全账号冷却中的账号即使对某模型无独立冷却
-// 也不被选出；健康 + 仅该模型 6004 的账号走模型豁免（同一账号对不同模型口径分离）。
+// TestHealthyForModelPriorityViaPick 6004 与账号级冷却同属账户级：两者都冻结账户，
+// 对任何模型都不可选。
 func TestHealthyForModelPriorityViaPick(t *testing.T) {
 	withNoPickGap(t)
 	p := New("")
@@ -465,27 +453,18 @@ func TestHealthyForModelPriorityViaPick(t *testing.T) {
 	p.Add(&auth.Auth{UID: "exempt"})
 	p.SetCredits("cooled", 100, 0)
 	p.SetCredits("exempt", 50, 0)
-	p.SetRandomSource(func(n int64) int64 { return 0 }) // r=0 → 最高分 cooled
-	p.Cooldown("cooled", CoolSoft, time.Hour, "429")    // 全账号级冷却，无模型级记录
+	p.SetRandomSource(func(n int64) int64 { return 0 })
+	p.Cooldown("cooled", CoolSoft, time.Hour, "429")
 	p.CooldownSoftForModel("exempt", time.Minute, time.Now().Add(5*time.Minute), "glm-5.3", "6004")
 
-	// 请求 other：cooled 被全账号冷却拦截（即使无模型独立冷却），exempt 模型豁免
-	// （6004 只锁 glm-5.3）→ 唯一候选 exempt。
-	if got := p.PickExcludingForModel(nil, "other"); got == nil || got.UID != "exempt" {
-		t.Fatalf("other 模型请求应豁免 exempt（全账号冷却的 cooled 仍拦截），got %+v", got)
-	}
-	// 请求 glm-5.3：cooled 全账号冷却拦截；exempt 自身 6004 拦截 → 无健康候选 →
-	// 全冷却兜底只认账号级冷却（exempt 无 until/breakerUntil,expiry 零值被排除），
-	// 选 cooled（软冷却参与兜底）。
-	if got := p.PickExcludingForModel(nil, "glm-5.3"); got == nil || got.UID != "cooled" {
-		t.Fatalf("glm-5.3 请求：exempt 被自身 6004 拦截，兜底应选全账号冷却的 cooled，got %+v", got)
+	// 两个账号都账户级冷却 → 无健康候选 → 兜底选最早到期（exempt，5m vs 1h）。
+	if got := p.PickExcludingForModel(nil, "glm-5.3"); got == nil || got.UID != "exempt" {
+		t.Fatalf("glm-5.3 请求兜底应选最早到期的 exempt, got %+v", got)
 	}
 }
 
-// TestModelCooldownsNotPersisted modelCooldowns 运行态、不持久化（重启清零）。
+// TestModelCooldownsPersist 6004（账户级 until）持久化到 state.json 并跨重启恢复。
 func TestModelCooldownsPersist(t *testing.T) {
-	// 6004 重置墙钟可长达数小时，跨重启是常态：model_cooldowns 持久化，
-	// 恢复后 healthyForModel 不失忆（吸收上游 2f4c77b）。
 	dir := t.TempDir()
 	fp := dir + "/state.json"
 	p := New(fp)
@@ -496,16 +475,16 @@ func TestModelCooldownsPersist(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(raw), "model_cooldowns") {
-		t.Errorf("state.json 应持久化 model_cooldowns: %s", raw)
+	if !strings.Contains(string(raw), "until") {
+		t.Errorf("state.json 应持久化账户级 until: %s", raw)
 	}
 	p2 := New(fp)
 	p2.Add(&auth.Auth{UID: "u1"})
 	p2.mu.RLock()
-	n := len(p2.byUID["u1"].modelCooldowns)
+	until := p2.byUID["u1"].until
 	p2.mu.RUnlock()
-	if n != 1 {
-		t.Errorf("重载后 modelCooldowns=%d want 1（持久化恢复）", n)
+	if until.IsZero() {
+		t.Errorf("重载后 until 应恢复（账户级冷却持久化）")
 	}
 }
 

@@ -635,7 +635,6 @@ func TestChat6004ModelResetCoolsToParsedTime(t *testing.T) {
 	)
 	p.SetCredits("bad", 2000, 0)
 	p.SetCredits("good", 1000, 0)
-	// 隔离对 breaker 的干扰：熔断阈值默认 3，一次失败不触发。
 	h := NewHandler(Config{Pool: p, Upstream: up})
 	req := httptest.NewRequest("POST", "/v1/chat/completions",
 		strings.NewReader(`{"model":"glm-5.3","messages":[]}`))
@@ -644,28 +643,26 @@ func TestChat6004ModelResetCoolsToParsedTime(t *testing.T) {
 	if rec.Code != 200 {
 		t.Fatalf("code=%d body=%s (want 200 after rotate to good)", rec.Code, rec.Body)
 	}
-	// bad 已进入 6004 模型级独立冷却：账号级不 cooling，台账单行 until ≈ reset。
+	// bad 已进入 6004 账户级冷却：account-level cooling，until ≈ reset。
 	st, _ := p.Status("bad")
-	if st.Cooling {
-		t.Fatalf("6004-with-reset should NOT set account-level cooling: %+v", st)
+	if !st.Cooling {
+		t.Fatalf("6004-with-reset should set account-level cooling: %+v", st)
 	}
-	if len(st.RateLimitedModels) != 1 || st.RateLimitedModels[0].Model != "glm-5.3" {
-		t.Fatalf("want single model ledger row glm-5.3: %+v", st.RateLimitedModels)
+	if len(st.RateLimitedModels) != 0 {
+		t.Fatalf("no model ledger expected (account-level cooling): %+v", st.RateLimitedModels)
 	}
-	if d := st.RateLimitedModels[0].Until.Sub(reset); d < -time.Second || d > time.Second {
-		t.Errorf("model until=%v want ~reset=%v (diff %v)", st.RateLimitedModels[0].Until, reset, d)
+	if d := st.Until.Sub(reset); d < -time.Second || d > time.Second {
+		t.Errorf("until=%v want ~reset=%v (diff %v)", st.Until, reset, d)
 	}
-	// 记录触发模型（bad 池内 private 字段需经 Status 不可见，改用行为断言）：
-	// 同模型 glm-5.3 的请求不应选中 bad（仍冷却）；
-	// 不同模型 hy3-x 的请求应豁免冷却选中 bad（最高分）。
+	// 账户级冻结：同模型与不同模型的请求都应跳过 bad。
 	p.SetRandomSource(func(n int64) int64 { return 0 })
 	same := p.PickExcludingForModel(nil, "glm-5.3")
 	if same == nil || same.UID != "good" {
-		t.Fatalf("same-model pick should skip bad (still cooling), got %+v", same)
+		t.Fatalf("same-model pick should skip bad (frozen), got %+v", same)
 	}
 	diff := p.PickExcludingForModel(nil, "hy3-x")
-	if diff == nil || diff.UID != "bad" {
-		t.Fatalf("different-model pick should bypass bad soft cooling, got %+v", diff)
+	if diff == nil || diff.UID != "good" {
+		t.Fatalf("different-model pick should also skip bad (frozen), got %+v", diff)
 	}
 }
 

@@ -38,11 +38,11 @@ func TestTransitionDisableClearsCoolingDomain(t *testing.T) {
 	p := New("")
 	p.Add(&auth.Auth{UID: "u1"})
 	p.Cooldown("u1", CoolSoft, 600*time.Second, "429")                                          // until + coolKind=soft + softStreak=1
-	p.CooldownSoftForModel("u1", time.Minute, time.Now().Add(5*time.Minute), "glm-5.3", "6004") // modelCooldowns=1（softStreak 增到 2）
+	p.CooldownSoftForModel("u1", time.Minute, time.Now().Add(5*time.Minute), "glm-5.3", "6004") // 账户级 until 更新（不再写 modelCooldowns）
 
 	_, _, reason, _, mc := coolingDomain(t, p, "u1")
-	if reason == "" || mc != 1 {
-		t.Fatalf("precondition: 应先处于软冷却+模型级冷却态 (reason=%q modelCooldowns=%d)", reason, mc)
+	if reason == "" || mc != 0 {
+		t.Fatalf("precondition: 应处于软冷却态且无模型级冷却 (reason=%q modelCooldowns=%d)", reason, mc)
 	}
 
 	p.Disable("u1", "account banned")
