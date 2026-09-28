@@ -31,13 +31,14 @@ import (
 
 // Config 面板依赖（main 装配注入）。
 type Config struct {
-	Pool      *pool.Pool
-	Upstream  *upstream.Client
-	Scheduler *scheduler.Scheduler // 手动触发签到/保活；nil 时对应接口返回 501
-	AuthDir   string               // OAuth 登录完成后凭证落盘目录
-	APIKey    string               // 空 = 不鉴权（与主服务同语义）；与 Live 同时给出时 Live 优先
-	RedisMode string               // "upstash" / "noop"，仅观测透出
-	Version   string               // 面板版本号（展示用）
+	Pool        *pool.Pool
+	Upstream    *upstream.Client
+	Scheduler   *scheduler.Scheduler // 手动触发签到/保活；nil 时对应接口返回 501
+	AuthDir     string               // OAuth 登录完成后凭证落盘目录
+	APIKey      string               // 数据面密钥；管理面用 AdminAPIKey（空则回落此项）
+	AdminAPIKey string               // 管理面密钥（/panel/**）；空 = 回落 APIKey
+	RedisMode   string               // "upstash" / "noop"，仅观测透出
+	Version     string               // 面板版本号（展示用）
 
 	// Live 运行期可变配置（在线改配置立即生效）。
 	Live *livecfg.Holder
@@ -202,10 +203,16 @@ func (p *Panel) withAuth(next http.HandlerFunc) http.HandlerFunc {
 	}
 }
 
-// apiKey 当前生效密钥（Live 优先，回落静态字段）。
+// apiKey 当前生效的**管理面**密钥（Live 优先，回落静态字段）。
+// 管理面密钥与数据面（/v1/*）分离：客户即使持有自己的数据面密钥，也进不了面板。
+// 解析顺序：Live.AdminAPIKey → Live.APIKey（Live 无管理密钥时的回落，见 Snapshot.AdminKey）
+// → cfg.AdminAPIKey → cfg.APIKey（无 Live 的测试/裸用场景）。
 func (p *Panel) apiKey() string {
 	if p.cfg.Live != nil {
-		return p.cfg.Live.Load().APIKey
+		return p.cfg.Live.Load().AdminKey()
+	}
+	if p.cfg.AdminAPIKey != "" {
+		return p.cfg.AdminAPIKey
 	}
 	return p.cfg.APIKey
 }

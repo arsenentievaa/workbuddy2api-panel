@@ -124,7 +124,9 @@ func NewHandler(cfg Config) *Handler {
 	h := &Handler{cfg: cfg, mux: http.NewServeMux()}
 	h.mux.HandleFunc("POST /v1/chat/completions", h.withAuth(h.chatCompletions))
 	h.mux.HandleFunc("GET /v1/models", h.withAuth(h.models))
-	h.mux.HandleFunc("GET /status", h.withAuth(h.status))
+	// /status 是**管理面**：它 dump 整个账号池（昵称/UID/积分/成本账本），
+	// 用管理密钥而非数据面密钥（审计：客户拿到自己的密钥不该看到池内部）。
+	h.mux.HandleFunc("GET /status", h.withAdminAuth(h.status))
 	h.mux.HandleFunc("GET /healthz", h.healthz)
 	if cfg.Panel != nil {
 		h.mux.Handle("/panel/", cfg.Panel) // /panel → /panel/ 由 ServeMux 自动重定向
@@ -136,9 +138,24 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	h.mux.ServeHTTP(w, r)
 }
 
+// withAuth 数据面鉴权（/v1/chat/completions、/v1/models）：用客户持有的数据面密钥。
 func (h *Handler) withAuth(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if !httpauth.VerifyBearer(r, h.loadLive().APIKey) {
+			writeOpenAIError(w, http.StatusUnauthorized, "invalid_api_key", "missing or invalid API key")
+			return
+		}
+		next(w, r)
+	}
+}
+
+// withAdminAuth 管理面鉴权（/status）：用管理密钥（admin_api_key）。
+// 与数据面分离后，客户即使拿到自己的 API key 也无法读取账号池状态。
+// admin_api_key 未配置时回落数据面密钥——未做分离的部署行为不变（不会锁死）。
+// 鉴权失败同样回 401 且文案不含任何内部信息（不告诉探测者"这是管理端点"）。
+func (h *Handler) withAdminAuth(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if !httpauth.VerifyBearer(r, h.loadLive().AdminKey()) {
 			writeOpenAIError(w, http.StatusUnauthorized, "invalid_api_key", "missing or invalid API key")
 			return
 		}
@@ -160,8 +177,13 @@ func (h *Handler) healthz(w http.ResponseWriter, r *http.Request) {
 		"cn":     h.cfg.Pool.ServableForRealm("cn"),
 		"global": h.cfg.Pool.ServableForRealm("global"),
 	}
-	// 恒无鉴权（负载均衡/编排探活只需 2xx/503 语义），身份靠 service 字段 + X-Service 头双保险。
-	w.Header().Set("X-Service", ServiceName)
+	// 恒无鉴权（负载均衡/编排探活只需 2xx/503 语义）。
+	// 身份标识默认**不写响应头**（安全审计）：X-Service: workbuddy2api 会在这个
+	// 无鉴权的公网端点上明文暴露服务名。响应体 service 字段保留（宿主仍可读它），
+	// 需要旧行为的宿主用 features.healthz_service_header=true 一键恢复。
+	if h.loadLive().HealthzServiceHeader {
+		w.Header().Set("X-Service", ServiceName)
+	}
 	writeJSON(w, status, map[string]any{
 		"healthy":        healthy,
 		"total":          total,
@@ -604,6 +626,15 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	// 模型名，如 claude-opus-5）。命中 claude-* 时在工程助手提示词前追加一段 Claude
 	// 身份声明，让被替换的底层模型按正确的 Claude 型号自称，避免"你是什么模型"露馅。
 	systemPrompt := h.cfg.PromptText
+	// clientModel 是**面向客户端的模型名**，用于回显响应 model 字段。
+	// 优先 X-Origin-Model：NewAPI 做 model_mapping 重定向时透传客户原始模型名
+	// （如 claude-opus-5），而请求 body 里的 model 已被改写成后端名。两者皆无 →
+	// 用请求原串（客户自己的输入）。绝不回显后端真实模型名
+	// —— 审计泄漏 P0：旧实现返回 model=deepseek-v4.1-flash，直接暴露替换。
+	clientModel := strings.TrimSpace(r.Header.Get("X-Origin-Model"))
+	if clientModel == "" {
+		clientModel = peek.Model
+	}
 	if origin := r.Header.Get("X-Origin-Model"); strings.HasPrefix(origin, "claude-") {
 		systemPrompt = prompt.Identity(prompt.ModelDisplayName(origin)) + h.cfg.PromptText
 	}
@@ -800,37 +831,37 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 				fail(acct.UID)
 				msg := upstream.MaskErrorMessage(upstream.ErrContentBlocked)
 				writeOpenAIErrorHint(w, http.StatusBadRequest, "content_blocked", msg,
-					h.hintOf(upstream.ErrContentBlocked, string(respBody), bareModel, reqHasImage, uerr))
+					upstream.SafeHint(h.hintOf(upstream.ErrContentBlocked, string(respBody), bareModel, reqHasImage, uerr), clientModel, bareModel))
 				st.status = http.StatusBadRequest
 				return
 			}
-			// 11115「prompt is too long」：立即透传上游原文回客户端，**不罚号不轮转**
-			// ——上下文超限是请求的问题（同一 body 换任何号都超限，白扔健康号配额；
-			// 与 WAF IP fail-fast 同哲学：确定与账号无关的错误直接终止轮转）。
+			// 11115「prompt is too long」：400 + **中性文案**回客户端，不罚号不轮转
+			// ——上下文超限是请求的问题（同一 body 换任何号都超限，白扔健康号配额）。
 			// applyErrorPolicy ErrPromptTooLong 分支零动作，fail 只释放租约。
-			// message 装上游 body 原文（含真实 token 数与上限值——上游原文是最有价值
-			// 的错误信息，客户端必须看到，禁止固定词覆盖）。
+			// 注：审计前注释称"透传上游 body 原文（含真实 token 数）"，与代码不符
+			// ——代码一直用 MaskErrorMessage（防后端身份泄漏），此处更正注释。
 			if kind == upstream.ErrPromptTooLong {
 				h.applyErrorPolicy(acct.UID, kind, string(respBody), bareModel, uerr)
 				fail(acct.UID)
 				writeOpenAIErrorHint(w, http.StatusBadRequest, "prompt_too_long", upstream.MaskErrorMessage(upstream.ErrPromptTooLong),
-					h.hintOf(upstream.ErrPromptTooLong, string(respBody), bareModel, reqHasImage, uerr))
+					upstream.SafeHint(h.hintOf(upstream.ErrPromptTooLong, string(respBody), bareModel, reqHasImage, uerr), clientModel, bareModel))
 				st.status = http.StatusBadRequest
 				return
 			}
-			// 图片格式/数据无效：立即透传上游原文回客户端，不罚号不轮转。
+			// 图片格式/数据无效：400 + 中性文案回客户端，不罚号不轮转。
 			// 同一 body 换账号仍是同样的解析结果，轮转只会放大无效请求。
 			if kind == upstream.ErrImageInvalid {
 				h.applyErrorPolicy(acct.UID, kind, string(respBody), bareModel, uerr)
 				fail(acct.UID)
 				msg := upstream.MaskErrorMessage(upstream.ErrImageInvalid)
 				writeOpenAIErrorHint(w, http.StatusBadRequest, "image_invalid", msg,
-					h.hintOf(upstream.ErrImageInvalid, string(respBody), bareModel, reqHasImage, uerr))
+					upstream.SafeHint(h.hintOf(upstream.ErrImageInvalid, string(respBody), bareModel, reqHasImage, uerr), clientModel, bareModel))
 				st.status = http.StatusBadRequest
 				return
 			}
-			// lastErr 携带完整 body（uerr.Msg 在 upstream 侧截断 200 字符，透传语义
-			// 要求原文全量）+ Kind/RetryAfter（末端映射与冷却时长共用）。
+			// lastErr 携带完整 body（uerr.Msg 在 upstream 侧截断 200 字符）+ Kind/
+			// RetryAfter（末端映射与冷却时长共用）。**该 body 只用于服务端分类与
+			// hint 判定，绝不写入客户端响应**——客户端只拿标准 code + 中性文案。
 			lastErr = &upstream.Error{Kind: kind, Status: status, Msg: string(respBody), RetryAfter: uerr.RetryAfter}
 			h.applyErrorPolicy(acct.UID, kind, string(respBody), bareModel, uerr)
 			fail(acct.UID)
@@ -862,9 +893,9 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			// gateway_hint（SSE）：成功状态 200 已开流，中途 error 帧透传时附加
 			// hint 字段（hintFn 惰性求值——正常流零开销，只有真撞到 error 帧才
 			// 组装请求上下文做判定）。
-			sErr := upstream.StreamHint(w, stats, upstream.FrameHintFunc(func() upstream.HintContext {
+			sErr := upstream.StreamWithOpts(w, stats, upstream.FrameHintFunc(func() upstream.HintContext {
 				return h.hintContext(bareModel, reqHasImage)
-			}))
+			}), upstream.StreamOpts{ClientModel: clientModel, SanitizeIDs: true})
 			if upstream.IsEmptyStreamError(sErr) {
 				// 上游 200 但空流（0 有效帧）：StreamHint 已写 error 帧 + [DONE]
 				// 兜底（HTTP 头已发出只能 200），但这是上游缺陷不是成功——日志/
@@ -898,11 +929,18 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			recordAttempt(acct.UID, pool.TokenUsageDelta{}, attemptStarted)
 			// 上游流解析失败：客户端还没看到任何输出，回 502 并告知原因。
-			writeOpenAIError(w, http.StatusBadGateway, "upstream_parse", err.Error())
+			// 客户端面不暴露解析细节/上游字样：中性文案 + 标准 code（审计）。
+			writeOpenAIError(w, http.StatusBadGateway, "bad_gateway", "the service returned an invalid response; please retry")
 			st.status = http.StatusBadGateway
 			return
 		}
 		recordAttempt(acct.UID, usageDeltaFromResponse(resp), attemptStarted)
+		// 客户端面脱敏（安全审计）：model 回显**客户请求的**模型名；id 换成网关
+		// 自造值（去上游关联标识）；剥离后端部署指纹字段。上游真实模型名绝不出现。
+		resp["model"] = clientModel
+		resp["id"] = upstream.NewResponseID()
+		delete(resp, "system_fingerprint")
+		delete(resp, "service_tier")
 		writeJSON(w, http.StatusOK, resp)
 		st.status = http.StatusOK
 		st.toks = completionTokens(resp)
@@ -921,27 +959,16 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	status := http.StatusServiceUnavailable
 	code := "service_unavailable"
 	msg := "the service is temporarily unavailable; please try again later"
-	// gateway_hint（末端透传）：上游错误按 Kind + 原文 + 请求形态判定；本地调度类
+	// gateway_hint（末端）：上游错误按 Kind + 原文 + 请求形态判定；本地调度类
 	// 错误（无上游原文）固定 no_healthy_account hint。
 	hint := upstream.NoHealthyAccountHint()
 	var ue *upstream.Error
 	if errors.As(lastErr, &ue) {
 		hint = h.hintOf(ue.Kind, ue.Msg, bareModel, reqHasImage, ue)
-		switch ue.Kind {
-		case upstream.ErrSoftRate:
-			status = http.StatusTooManyRequests
-			code = "rate_limit_exceeded"
-			msg = "rate limited: all accounts are cooling down, please wait a moment and try again"
-		case upstream.ErrWafBlock:
-			if h.wafIP.active() {
-				// IP 级拦截措辞（fail-fast 终止路径）：网关出口 IP 被 WAF 拦截、
-				// 轮转已止损、窗口过后自动解除。客户端提前重试无意义（换号不换 IP）；
-				// 有上游原文时原文优先（下方统一）。
-				code = "waf_ip_blocked"
-				msg = "waf ip-level block: upstream firewall is blocking the gateway IP, rotation stopped; retry after the block window expires"
-			}
-		}
-		msg = upstream.MaskErrorMessage(ue.Kind)
+		// 标准 HTTP 语义 + 公开 code + 中性文案（审计修复）。原实现按 Kind 手写
+		// 状态码/文案，其中 ErrHardCredit 落到 503、WAF IP 拦截回显 "gateway IP"。
+		ce := upstream.StandardizeClientError(ue.Kind, ue.Status, clientModel, bareModel)
+		status, code, msg = ce.Status, ce.Code, ce.Message
 	}
 	// 饱和排队失败（本地调度类错误，无上游原文可透传）：独立 code + hint，让客户端与
 	// 运维能分辨「上游容量不足」与「网关队列已满 / 等太久」——两者处置完全不同
@@ -950,23 +977,31 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case errors.Is(queueErr, pool.ErrQueueFull):
 			code = "queue_full"
-			msg = "gateway wait queue is full: every account is at its in-flight limit; retry later"
+			// 措辞不得暴露"网关有等待队列/上游账号池"（安全审计）：只描述客户端
+			// 能观察到的事实——服务暂时满载。
+			msg = "the service is temporarily at capacity; please retry later"
 			hint = queueFullHint
 		case errors.Is(queueErr, pool.ErrQueueTimeout):
 			code = "queue_timeout"
-			msg = "timed out waiting for a free upstream slot: every account is at its in-flight limit"
+			msg = "the service is temporarily at capacity; the request timed out waiting for capacity"
 			hint = queueTimeoutHint
 		}
 	}
+	// 最后一道闸（审计）：任何待发文本命中内部标记就换掉/丢弃。allow 传客户端
+	// 模型名——/v1/models 公开售卖的 glm-5.2 / deepseek-* 是客户自己的输入回显，
+	// 不是内部引用，必须放行。
+	msg, _ = upstream.InternalLeakGuard(msg, clientModel, bareModel)
+	hint = upstream.SafeHint(hint, clientModel, bareModel)
 	writeOpenAIErrorHint(w, status, code, msg, hint)
 	st.status = status
 }
 
 // queueFullHint / queueTimeoutHint 是饱和排队的 gateway_hint（本地调度事实，
 // 与 upstream.noHealthyHint 同口径：不含上游字样，不编造原文）。
+// 措辞不含 gateway/upstream/pool/account（安全审计：这些词披露中转与账号池架构）。
 const (
-	queueFullHint    = "gateway concurrency is saturated and the wait queue is full; the upstream pool has no free in-flight slot"
-	queueTimeoutHint = "gateway concurrency is saturated; the request waited for a free upstream slot and timed out"
+	queueFullHint    = "the service is temporarily at capacity; retry shortly"
+	queueTimeoutHint = "the service is temporarily at capacity; retry shortly"
 )
 
 // promptTooLongMessage 11115 透传 message：上游 body 原文（含真实 token 数/

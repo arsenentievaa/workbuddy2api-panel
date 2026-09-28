@@ -17,10 +17,14 @@ import (
 
 // Config 顶层配置。
 type Config struct {
-	Listen    string `json:"listen"`     // ":7863"
-	APIKey    string `json:"api_key"`    // 空 = 不鉴权
-	AuthDir   string `json:"auth_dir"`   // ./auths
-	StateFile string `json:"state_file"` // ./data/state.json
+	Listen string `json:"listen"`  // ":7863"
+	APIKey string `json:"api_key"` // 数据面密钥（/v1/*）：空 = 不鉴权
+	// AdminAPIKey 管理面密钥（/status、/panel/**），与数据面分离：客户拿到自己的
+	// 密钥也进不了管理面。空 = 回落 APIKey（向后兼容，不会锁死既有部署）。
+	// 忘记时恢复：把该项置空，或设 WB2A_ADMIN_API_KEY 环境变量后重启。
+	AdminAPIKey string `json:"admin_api_key"`
+	AuthDir     string `json:"auth_dir"`   // ./auths
+	StateFile   string `json:"state_file"` // ./data/state.json
 
 	Cooldown struct {
 		// hard_credit / err_threshold / err_cooldown 三个历史键已退役：
@@ -103,6 +107,9 @@ type Config struct {
 	Features struct {
 		// SanitizeBlacklistFingerprints 出站请求体黑名单指纹脱敏（默认 true；false 完全还原）。
 		SanitizeBlacklistFingerprints bool `json:"sanitize_blacklist_fingerprints"`
+		// HealthzServiceHeader 是否在 /healthz 回写 X-Service 响应头。
+		// 默认 false（审计修复）：该端点无鉴权，明文服务名是公网指纹。
+		HealthzServiceHeader bool `json:"healthz_service_header"`
 	} `json:"features"`
 
 	Prompt struct {
@@ -320,6 +327,11 @@ func applyEnv(c *Config) {
 	}
 	if v := os.Getenv("WB2A_API_KEY"); v != "" {
 		c.APIKey = v
+	}
+	// WB2A_ADMIN_API_KEY：管理面密钥的**带外恢复通道**（忘记 admin_api_key 时不必改
+	// 配置文件，在部署平台加环境变量重启即可）。
+	if v := os.Getenv("WB2A_ADMIN_API_KEY"); v != "" {
+		c.AdminAPIKey = v
 	}
 	if v := os.Getenv("WB2A_AUTH_DIR"); v != "" {
 		c.AuthDir = v

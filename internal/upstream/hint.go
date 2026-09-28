@@ -1,10 +1,15 @@
 // hint.go 网关错误附加说明字段（error.gateway_hint）的单一事实来源。
 //
-// 纪律（任务书 gateway-hint）：
-//   - error.message 永远是上游 body 原文透传（5755fe3 透传原则不动）；
-//     gateway_hint 只做与 message **并列**的网关视角补充说明，绝不替换/包装 message。
+// 纪律（安全审计后收紧）：
+//   - error.message 是**中性掩码文案**（MaskErrorMessage），绝不是上游 body 原文
+//     —— 上游原文会暴露后端模型名、余额文案与中文原文。本文件顶部的历史注释曾
+//     写"message 永远是上游原文透传"，与代码相反，已于审计中更正。
+//   - gateway_hint 只做与 message **并列**的网关视角补充说明，绝不替换/包装 message。
 //   - 文案集中在本文件（一张 Kind 表 + 11133/11135 形态判定），按 ErrKind + 上下文
 //     （请求带图/模型目录能力）映射，不散落 handler 的 if-else。
+//   - **措辞不得暴露内部架构**：不出现 upstream/backend/account/pool/gateway 等词。
+//     客户端只需知道"发生了什么、该怎么做"；"有多个后端账号在轮转"属于内部信息。
+//     该纪律由 TestHintsDoNotLeakInternalRefs 强制。
 //   - 未覆盖形态返回空串 → 响应不带该字段（不编造）。
 //   - hint 措辞是英文（错误响应面向客户端工具链，英文是通用口径）。
 package upstream
@@ -36,23 +41,23 @@ func GatewayHint(kind ErrKind, msg string, ctx HintContext) string {
 		if ctx.HasImage && ctx.ModelInCatalog && !ctx.ModelSupportsImages {
 			return "model " + ctx.Model + " does not support images; pick one with supports_images=true from /v1/models"
 		}
-		return "request parameters were rejected by the model provider; check message format and model capabilities"
+		return "request parameters were rejected; check message format and model capabilities"
 	}
 	// 11135 invalid_image_data 家族（图片数据无效，Discussion #77 实测形态）。
 	if isInvalidImageData(msg) {
-		return "image data rejected by upstream; use a real/valid image, may need a new conversation"
+		return "image data was rejected; use a valid image (a new conversation may help)"
 	}
 	switch kind {
 	case ErrPromptTooLong:
 		return "request context exceeds the model's limit; reduce history/message size"
 	case ErrImageInvalid:
-		return "image request was rejected by upstream; check image_url format and image data"
+		return "image request was rejected; check image_url format and image data"
 	case ErrWafBlock:
 		// 账号级 WAF 403 与 IP 级 fail-fast 同 hint：两者对客户端的动作一致
-		// （等待窗口过去再试，换号/立刻重试无意义）。
-		return "upstream WAF blocked the gateway; retry after the block window"
+		// （等待窗口过去再试）。措辞不提"上游防火墙"——那会暴露中转架构。
+		return "the service is temporarily unavailable; retry after the block window"
 	case ErrSoftRate:
-		return "rate limited by upstream; retry after reset"
+		return "rate limited; retry after the reset window"
 	case ErrAccountFault:
 		return "the service is temporarily unavailable; please try again later"
 	case ErrSessionDead:
@@ -60,7 +65,9 @@ func GatewayHint(kind ErrKind, msg string, ctx HintContext) string {
 	case ErrHardCredit:
 		return "the service is temporarily unavailable; please try again later"
 	case ErrModelBlocked:
-		return "upstream has no such model on this backend; switch model or retry on another account"
+		// 原措辞 "on this backend … retry on another account" 直接暴露多账号池架构
+		// （审计泄漏 P2），改为只告诉客户端"换一个目录里的模型"。
+		return "the requested model is not available; pick a model from /v1/models"
 	case ErrContentBlocked:
 		// 措辞不含 "upstream"：content_blocked 响应有不含上游字样的既有口径
 		// （handler_test 的泄漏守卫），hint 遵守同一口径。

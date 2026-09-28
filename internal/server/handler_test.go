@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/linguo2625469/workbuddy2api-panel/internal/auth"
+	"github.com/linguo2625469/workbuddy2api-panel/internal/livecfg"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/pool"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/prompt"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/redisstore"
@@ -171,7 +172,10 @@ func TestChatBadParamsRotatesWithoutPenalty(t *testing.T) {
 
 // TestChatAllBadParams503Masked 全部账号都 11101 时 503 文案必须为中性掩码，
 // 不得透传上游原始 11101 信息（防后端身份/参数细节泄漏）。
-func TestChatAllBadParams503Masked(t *testing.T) {
+// TestChatAllBadParams400Masked 请求体解析失败（11101）→ **400**（审计前是 503）。
+// 语义修正：这是客户端请求的问题，不是服务不可用；503 会误导客户端重试并可能
+// 触发其熔断。防泄漏断言（不得出现 11101 / 上游原文）保持不变。
+func TestChatAllBadParams400Masked(t *testing.T) {
 	up := newFakeUpstream(t, func(authz string) (int, string, bool) {
 		return 400, `{"code":11101,"msg":"Unmarshal chat params failed with error: unexpected EOF"}`, false
 	})
@@ -179,15 +183,15 @@ func TestChatAllBadParams503Masked(t *testing.T) {
 	h := NewHandler(Config{Pool: p, Upstream: up})
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"glm-5.2","messages":[]}`)))
-	if rec.Code != 503 {
-		t.Fatalf("code=%d body=%s (want 503)", rec.Code, rec.Body)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("code=%d body=%s (want 400)", rec.Code, rec.Body)
 	}
 	body := rec.Body.String()
 	if strings.Contains(body, "11101") || strings.Contains(body, "Unmarshal chat params failed") {
-		t.Errorf("503 message must NOT leak upstream 11101 info: %s", body)
+		t.Errorf("message must NOT leak upstream 11101 info: %s", body)
 	}
 	if !strings.Contains(body, "invalid request parameters") {
-		t.Errorf("503 message should be the neutral masked message: %s", body)
+		t.Errorf("message should be the neutral masked message: %s", body)
 	}
 }
 
@@ -700,6 +704,8 @@ func TestChat6004WithoutResetFallsBackToBackoff(t *testing.T) {
 	}
 }
 
+// TestChatAllUnavailableReturns503 上游账号余额耗尽 → **503**（审计标准化有意
+// 不用 402：NewAPI 可能因 402 自动禁用渠道），且上游中文原文与协议码不外泄。
 func TestChatAllUnavailableReturns503(t *testing.T) {
 	up := newFakeUpstream(t, func(authz string) (int, string, bool) {
 		return 402, `{"code":1,"msg":"余额不足"}`, false
@@ -711,13 +717,17 @@ func TestChatAllUnavailableReturns503(t *testing.T) {
 	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"glm-5.2","messages":[]}`))
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
-	if rec.Code != 503 {
-		t.Errorf("code=%d body=%s", rec.Code, rec.Body)
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Errorf("code=%d body=%s want 503", rec.Code, rec.Body)
 	}
 	var e map[string]any
 	json.Unmarshal(rec.Body.Bytes(), &e)
 	if e["error"] == nil {
 		t.Errorf("want error envelope: %s", rec.Body)
+	}
+	// 泄漏守卫：上游中文余额文案与内部协议码不得出现在客户端面。
+	if b := rec.Body.String(); strings.Contains(b, "余额不足") || strings.Contains(b, `"code":1`) {
+		t.Errorf("must NOT leak upstream balance text/code: %s", b)
 	}
 }
 
@@ -788,8 +798,9 @@ func TestChatHTTP4xxClientDoesNotPenalize(t *testing.T) {
 	h := NewHandler(Config{Pool: p, Upstream: up})
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"glm-5.2","messages":[]}`)))
-	if rec.Code != 503 {
-		t.Fatalf("code=%d body=%s", rec.Code, rec.Body)
+	// 审计标准化：客户端类 4xx 映射为 400（审计前统一落 503）。
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("code=%d body=%s want 400", rec.Code, rec.Body)
 	}
 	st, _ := p.Status("u1")
 	if st.Cooling || st.ErrTotal != 0 {
@@ -1242,8 +1253,10 @@ func TestHealthzServiceIdentity(t *testing.T) {
 			if rec.Code != tc.wantCode {
 				t.Fatalf("code=%d want %d", rec.Code, tc.wantCode)
 			}
-			if got := rec.Header().Get("X-Service"); got != ServiceName {
-				t.Errorf("X-Service=%q want %q", got, ServiceName)
+			// 安全审计：默认**不**回写 X-Service —— 该端点在公网无鉴权，明文服务名
+			// 是指纹。身份仍在响应体 service 字段里，宿主可继续据此判"假成功"。
+			if got := rec.Header().Get("X-Service"); got != "" {
+				t.Errorf("X-Service=%q want empty (audit: no service name on unauthenticated endpoint)", got)
 			}
 			var resp map[string]any
 			if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
@@ -1269,8 +1282,24 @@ func TestHealthzServiceIdentityWithoutAuth(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("healthz must stay unauthenticated: code=%d", rec.Code)
 	}
+	if got := rec.Header().Get("X-Service"); got != "" {
+		t.Errorf("X-Service=%q want empty after audit", got)
+	}
+}
+
+// TestHealthzServiceHeaderOptIn X-Service 响应头可通过
+// features.healthz_service_header=true 恢复（一键回滚，无需改代码）——供依赖该头
+// 识别"假成功"的宿主使用。默认关闭是审计要求。
+func TestHealthzServiceHeaderOptIn(t *testing.T) {
+	h := NewHandler(Config{
+		Pool:     testPoolWith(&auth.Auth{UID: "u1", AccessToken: "at", ExpiresAt: 9999999999}),
+		Upstream: upstream.New(),
+		Live:     livecfg.New(livecfg.Snapshot{HealthzServiceHeader: true}),
+	})
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest("GET", "/healthz", nil))
 	if got := rec.Header().Get("X-Service"); got != ServiceName {
-		t.Errorf("X-Service=%q want %q", got, ServiceName)
+		t.Errorf("opt-in X-Service=%q want %q", got, ServiceName)
 	}
 }
 

@@ -389,11 +389,26 @@ func stripToolCallNames(obj map[string]any, seen map[int]bool) {
 // 空占位 function_call、顶层未知字段），空 delta 键一律省略，
 // usage 缺失 → null，保证任意标准客户端按规范解析。
 func normalizeFrame(obj map[string]any) map[string]any {
+	return normalizeFrameSafe(obj, "", false)
+}
+
+// normalizeFrameSafe 是 normalizeFrame 的脱敏变体：
+//   - clientModel 非空 → 顶层 model 改写为该值（客户端请求的模型名），上游真实
+//     模型名不再出现在任何一帧（审计泄漏 P0：每帧 model=deepseek-* 直接暴露替换）；
+//   - sanitizeIDs → 剥离 system_fingerprint / service_tier（后端部署指纹与服务层级）。
+func normalizeFrameSafe(obj map[string]any, clientModel string, sanitizeIDs bool) map[string]any {
 	out := map[string]any{}
-	for _, k := range []string{"id", "object", "created", "model", "system_fingerprint", "service_tier"} {
+	keys := []string{"id", "object", "created", "model"}
+	if !sanitizeIDs {
+		keys = append(keys, "system_fingerprint", "service_tier")
+	}
+	for _, k := range keys {
 		if v, ok := obj[k]; ok && v != nil {
 			out[k] = v
 		}
+	}
+	if clientModel != "" {
+		out["model"] = clientModel
 	}
 	if _, ok := out["object"]; !ok {
 		out["object"] = "chat.completion.chunk"
@@ -470,7 +485,7 @@ func normalizeFrame(obj map[string]any) map[string]any {
 // error.gateway_hint 字段——message 原文不动，hint 并列补充；hintFn 返回空串
 // 或 nil 时与 Stream 行为逐字节一致。
 func Stream(w http.ResponseWriter, r io.Reader) error {
-	return StreamHint(w, r, nil)
+	return StreamWithOpts(w, r, nil, StreamOpts{})
 }
 
 // StreamHint 同 Stream，但上游 error 帧透出前把 hintFn(payload) 的返回值写入
@@ -478,6 +493,22 @@ func Stream(w http.ResponseWriter, r io.Reader) error {
 // 空流兜底 error 帧（"empty upstream stream"）不带 hint（网关本地故障形态
 // 未覆盖，不编造）。
 func StreamHint(w http.ResponseWriter, r io.Reader, hintFn func(string) string) error {
+	return StreamWithOpts(w, r, hintFn, StreamOpts{})
+}
+
+// StreamOpts 客户端面脱敏选项。零值 = 既有行为（历史测试与内部调用零改动）。
+type StreamOpts struct {
+	// ClientModel 非空 → 每帧 model 改写为该值（客户端请求的模型名）。
+	// handler 恒传客户端模型名：上游真实模型名不再出现在流的任何一帧里
+	// （审计泄漏 P0 —— 每帧 model=deepseek-* 直接暴露 claude→deepseek 替换）。
+	ClientModel string
+	// SanitizeIDs → 用本响应稳定的网关自造 id 替换上游 id，并剥离
+	// system_fingerprint / service_tier 后端指纹字段。
+	SanitizeIDs bool
+}
+
+// StreamWithOpts 是 Stream/StreamHint 的脱敏入口（安全审计修复）。
+func StreamWithOpts(w http.ResponseWriter, r io.Reader, hintFn func(string) string, opts StreamOpts) error {
 	h := w.Header()
 	h.Set("Content-Type", "text/event-stream")
 	h.Set("Cache-Control", "no-cache")
@@ -493,6 +524,12 @@ func StreamHint(w http.ResponseWriter, r io.Reader, hintFn func(string) string) 
 	// （issue #35：同一条 SSE 消息所有帧共用一个真实 id，后台按 id 归并；此前中间帧
 	// 一律补 chatcmpl-wb2api 哨兵，造成同流 id 分裂）。全流无真实 id → 才出现哨兵。
 	firstID := ""
+	// respID：SanitizeIDs 时替换上游 id 的网关自造 id（每条响应一个，全帧稳定，
+	// 保持"同一条消息所有帧共用一个 id"的归并语义，但不外泄上游标识）。
+	respID := ""
+	if opts.SanitizeIDs {
+		respID = NewResponseID()
+	}
 
 	// writeRaw 原样写出一帧（绕过 normalizeFrame）并 flush。上游 error 帧（error-passthrough）
 	// 与空流错误帧需保留 error 字段，不能被白名单剥掉，故经此写出。
@@ -516,35 +553,42 @@ func StreamHint(w http.ResponseWriter, r io.Reader, hintFn func(string) string) 
 	// 仅 JSON 解析成功时计数记为一次有效转发（JSON 解析失败照常降级原样写出，但不计数）。
 	writeFrame := func(payload string) (int, error) {
 		var obj map[string]any
-		valid := 0
-		if json.Unmarshal([]byte(payload), &obj) == nil {
-			// 上游错误帧透传（error-passthrough）：带 error 键的帧**原样写出**，不走
-			// normalizeFrame 白名单——白名单会剥掉 error 字段，客户端就看不到上游
-			// code/msg/requestId。error.message 即上游原文（如 6004 限流、审核拦截），
-			// 计入有效帧（避免误判空流补写 "empty upstream stream"）。
-			if _, hasErr := obj["error"]; hasErr {
-				if werr := writeRaw(maskErrorFrame(payload)); werr != nil {
-					return 0, werr
-				}
-				return 1, nil
+		if json.Unmarshal([]byte(payload), &obj) != nil {
+			// 非 JSON 的 data 帧（纯文本 / HTML 错误页 / 厂商私有格式）：**不得原样外发**。
+			// 上游 403 常是 APISIX WAF 拦截页，带源站主机名、IP、厂商字样。
+			// 换一条通用 error 帧，并计一次有效帧（避免空流兜底再补一帧）。
+			if werr := writeRaw(GenericErrorFrame(ErrServer)); werr != nil {
+				return 0, werr
 			}
-			// 先按 index 收敛 tool_calls name（每 index 仅首片保留，后续分片删 name 键），再规范化透传。
-			stripToolCallNames(obj, toolCallSeen)
-			// id 续传：首帧非空真实 id 缓存；后续帧缺 id / 空 id 一律用缓存值，
-			// 有自己 id 的帧保持原样（不同流分裂的帧允许各自 id）。
-			if firstID == "" {
-				if v, ok := obj["id"].(string); ok && v != "" {
-					firstID = v
-				}
-			} else {
-				if v, ok := obj["id"].(string); !ok || v == "" {
-					obj["id"] = firstID
-				}
+			return 1, nil
+		}
+		// 上游错误帧透传前**必须**经 sanitizeErrorFrame：message 掩码 + code 换标准码
+		// + 去 requestId。白名单（normalizeFrameSafe）会剥掉 error 字段，故错误帧走
+		// writeRaw 而非白名单路径。
+		if _, hasErr := obj["error"]; hasErr {
+			if werr := writeRaw(sanitizeErrorFrame(payload)); werr != nil {
+				return 0, werr
 			}
-			if raw, err := json.Marshal(normalizeFrame(obj)); err == nil {
-				payload = string(raw)
+			return 1, nil
+		}
+		// 先按 index 收敛 tool_calls name（每 index 仅首片保留，后续分片删 name 键），再规范化透传。
+		stripToolCallNames(obj, toolCallSeen)
+		// id 处理：脱敏模式下换成本响应稳定的网关 id（上游 id 不外泄）；
+		// 否则保持既有语义——首帧非空真实 id 缓存，后续帧缺 id / 空 id 一律用缓存值，
+		// 有自己 id 的帧保持原样（不同流分裂的帧允许各自 id）。
+		if opts.SanitizeIDs {
+			obj["id"] = respID
+		} else if firstID == "" {
+			if v, ok := obj["id"].(string); ok && v != "" {
+				firstID = v
 			}
-			valid = 1
+		} else {
+			if v, ok := obj["id"].(string); !ok || v == "" {
+				obj["id"] = firstID
+			}
+		}
+		if raw, err := json.Marshal(normalizeFrameSafe(obj, opts.ClientModel, opts.SanitizeIDs)); err == nil {
+			payload = string(raw)
 		}
 		if _, werr := io.WriteString(w, "data: "+payload+"\n\n"); werr != nil {
 			return 0, werr
@@ -552,7 +596,7 @@ func StreamHint(w http.ResponseWriter, r io.Reader, hintFn func(string) string) 
 		if fl != nil {
 			fl.Flush()
 		}
-		return valid, nil
+		return 1, nil
 	}
 
 	br := bufio.NewReaderSize(r, 64*1024)
@@ -594,7 +638,7 @@ readLoop:
 	// 网关本地空流兜底帧走 hintFn=nil 的直写路径：该形态未覆盖（不编造 hint），
 	// 且 writeRaw 的 hintFn 闭包在空流路径下可能携带上一帧的上下文造成误配。
 	if validFrames == 0 {
-		_ = writeRaw(`{"error":{"message":"empty upstream stream","type":"upstream_error","code":"upstream_parse"}}`)
+		_ = writeRaw(GenericErrorFrame(ErrServer))
 	}
 	// 保证恰好写一个 [DONE]（上游漏发时兜底补上）。
 	if _, err := io.WriteString(w, "data: [DONE]\n\n"); err != nil {
@@ -619,23 +663,54 @@ func frameGatewayHint(hintFn func(string) string, payload string) string {
 	return strings.TrimSpace(hintFn(payload))
 }
 
-// maskErrorFrame rewrites an upstream error frame so its error.message never
-// reveals the backend provider (model name, "insufficient balance", Chinese
-// text). The error kind is classified from the frame payload; the message is
-// replaced with a neutral one. Non-JSON / non-error frames are returned as-is.
-func maskErrorFrame(payload string) string {
+// maskErrorFrame 保留为 sanitizeErrorFrame 的兼容别名（历史调用点/测试）。
+func maskErrorFrame(payload string) string { return sanitizeErrorFrame(payload) }
+
+// sanitizeErrorFrame 把上游错误帧重写成**客户端安全**的错误帧（审计修复）：
+//
+//	message    → 中性文案（不外泄后端模型名 / 余额文案 / 中文原文）
+//	code       → 标准公开 code（不回显上游协议码 6004/11140/11145/11102/…）
+//	requestId  → 删除（上游关联标识）
+//	其余字符串 → 命中内部标记的键直接删除（最后一道闸）
+//
+// 关键修复：**非 JSON / 无 error 对象的错误帧不再原样外发**。上游 403 常是
+// APISIX WAF 拦截页（HTML）或纯文本，这类内容常带源站主机名、IP、厂商字样；
+// 旧实现 `return payload` 会把整页原样发给客户端。现在统一收敛为通用错误帧。
+func sanitizeErrorFrame(payload string) string {
+	kind := FrameKind(payload)
+	generic := func() string {
+		b, _ := json.Marshal(map[string]any{"error": map[string]any{
+			"message": MaskErrorMessage(kind),
+			"type":    "upstream_error",
+			"code":    PublicErrorCode(kind),
+		}})
+		return string(b)
+	}
 	var obj map[string]any
 	if json.Unmarshal([]byte(payload), &obj) != nil {
-		return payload
+		return generic() // 非 JSON（WAF 页面 / 纯文本）：绝不原样外发
 	}
 	e, ok := obj["error"].(map[string]any)
 	if !ok {
-		return payload
+		return generic()
 	}
-	e["message"] = MaskErrorMessage(FrameKind(payload))
+	e["message"] = MaskErrorMessage(kind)
+	// type 也归一：上游可能给 "upstream_error" 之类的措辞，等于告诉客户端"存在中转"。
+	e["type"] = "api_error"
+	if c := PublicErrorCode(kind); c != "" {
+		e["code"] = c
+	}
+	for _, k := range []string{"requestId", "request_id", "traceId", "trace_id"} {
+		delete(e, k)
+	}
+	for k, v := range e {
+		if s, ok := v.(string); ok && LeaksInternal(s) {
+			delete(e, k)
+		}
+	}
 	out, err := json.Marshal(obj)
 	if err != nil {
-		return payload
+		return generic()
 	}
 	return string(out)
 }

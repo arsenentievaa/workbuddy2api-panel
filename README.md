@@ -312,7 +312,8 @@ curl -s http://localhost:7863/v1/chat/completions \
 | 字段 | 默认 | 说明 |
 |---|---|---|
 | `listen` | `:7863` | HTTP 监听地址 |
-| `api_key` | 空 | 网关鉴权密钥；**空 = 不鉴权直接放行**（公网必须设置） |
+| `api_key` | 空 | **数据面**鉴权密钥（`/v1/*`）；**空 = 不鉴权直接放行**（公网必须设置） |
+| `admin_api_key` | 空 | **管理面**鉴权密钥（`/panel/**`、`/status`）。与数据面分离：客户即使持有自己的 `api_key` 也读不到账号池、进不了面板。**空 = 回落 `api_key`**（向后兼容）。忘记时恢复：把该项置空，或在部署平台设 `WB2A_ADMIN_API_KEY` 环境变量后重启 |
 | `auth_dir` | `./auths` | 账号凭证目录 |
 | `state_file` | `./data/state.json` | 账号池状态持久化文件 |
 | `cooldown.soft_rate` | `600s` | 软限流（429 / 限流文案）冷却基数；同一账号连续触发按 2 倍指数退避 |
@@ -412,6 +413,25 @@ curl -s http://localhost:7863/v1/chat/completions \
 **熔断器**：所有冷却入口与 5xx 共用唯一连续失败计数器 `fails`；累计达 `breaker_threshold`（默认 3）触发熔断，退避 `breaker_cooldown × 2^retryCount`，封顶 `6h`；成功清零。
 
 **软冷却指数退避**（与熔断器并存的第二条升级线）：软限流的**冷却时长**本身也按连续次数退避——同一账号连续触发软冷却时 `soft_rate × 2^(连续次数-1)`，封顶 `soft_rate_max`。计数 `soft_streak` 独立于熔断器的 `fails`，只在**成功**或**签到解冻**时清零，随 `state.json` 持久化。
+
+### 客户端面脱敏（安全审计 2026-09-28）
+
+网关的上游是 CodeBuddy，下游是 NewAPI，而 NewAPI 会把错误文案与响应字段继续透给最终客户。因此**任何到达客户端的后端身份都是泄漏**。审计确认并修复的泄漏面：
+
+| 泄漏面 | 修复 |
+|---|---|
+| 响应 `model` 字段（非流式）与**每一帧** SSE 的 `model` = 真实后端模型名 | 一律回显**客户端请求的**模型名（`X-Origin-Model` 优先，回退请求原串） |
+| 响应 `id` = 上游消息标识 | 换成本响应稳定的网关自造 id（`chatcmpl-`+24 hex），保留"同流同一 id"的归并语义 |
+| `system_fingerprint` / `service_tier` | 从流式白名单中剥离 |
+| SSE error 帧的 `error.code` = 上游私有协议码（6004/11140/11145/11102/12153…） | 换为标准公开 code |
+| SSE error 帧的 `error.requestId` | 删除 |
+| **非 JSON** 的 error/data 帧（WAF 拦截页 HTML、纯文本）原样外发 | 一律收敛为通用 JSON 错误帧 |
+| `gateway_hint` 措辞（"this backend" / "another account" / "upstream pool"） | 改为只描述客户端可观察的事实 |
+| `/healthz` 的 `X-Service: workbuddy2api`（无鉴权公网端点） | 默认不回写；`features.healthz_service_header=true` 可恢复（响应体 `service` 字段保留） |
+
+错误状态码按标准 HTTP 语义映射（`internal/upstream/clientsafe.go` 的 `standardForKind` 是唯一事实来源）：请求类 4xx → 400，模型不存在 → 404，配额/限流 → 429，其余服务故障 → 503。**余额耗尽刻意保持 503 而非 402**：NewAPI 常把上游 402 视为渠道永久性失败并自动禁用渠道，一次账号欠费会升级成渠道下线。
+
+`LeaksInternal` 是发给客户端文本的最后一道闸（产品名、平台名、内部路径、协议码）；它带 `allow` 参数放行**客户端自己的模型名**——`/v1/models` 公开售卖的 `glm-5.2`/`deepseek-*`/`kimi-*` 是客户输入的回显，不是内部引用。
 
 ### 饱和排队（在途全满时的等待队列）
 
@@ -513,7 +533,11 @@ curl -s http://localhost:7863/v1/chat/completions \
 http://127.0.0.1:7863/panel/
 ```
 
-鉴权与 API 同口径：`api_key` 非空时面板要求输入一次密钥（浏览器 localStorage 记住）；为空则直接可用。
+鉴权用**管理面密钥**（`admin_api_key`）：非空时面板要求输入一次密钥（浏览器 localStorage 记住）；为空则回落 `api_key`；两者皆空则直接可用。
+
+> **两平面分离（安全审计）**：`admin_api_key` 与 `api_key` 是两把不同的钥匙。
+> `/v1/chat/completions`、`/v1/models` 用 `api_key`；`/panel/**` 与 `/status` 用 `admin_api_key`。
+> 401 文案在两侧完全一致——鉴权失败不会告诉探测者"这是管理端点"。
 界面支持**明暗主题切换**（首次跟随系统偏好，点击按钮两态翻转并记住选择），左侧导航分四个视图：
 
 | 视图 | 功能 |

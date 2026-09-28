@@ -652,10 +652,13 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
               <label class="fld"><span class="lb">监听地址</span>
                 <input name="listen" placeholder=":7863">
                 <span class="hint">改动需重启进程</span></label>
-              <label class="fld"><span class="lb">API 密钥</span>
+              <label class="fld"><span class="lb">API 密钥（数据面）</span>
                 <div class="inline"><input name="api_key" id="cfgKey" type="password" placeholder="留空 = 不鉴权">
                 <button type="button" class="xs" id="btnEye">显示</button></div>
-                <span class="hint">立即生效（含面板自身）</span></label>
+                <span class="hint">客户端用它调 /v1/*；立即生效</span></label>
+              <label class="fld"><span class="lb">管理密钥（面板 / 状态）</span>
+                <input name="admin_api_key" type="password" placeholder="留空 = 回落数据面密钥">
+                <span class="hint">保护 /panel/** 与 /status；与数据面分离后，客户密钥进不了管理面。忘记可在部署平台设 WB2A_ADMIN_API_KEY 后重启</span></label>
             </div>
           </div>
         </div>

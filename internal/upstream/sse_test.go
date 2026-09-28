@@ -697,7 +697,9 @@ func TestStreamEmptyFramesCase(t *testing.T) {
 			if n := strings.Count(body, "data: [DONE]"); n != 1 {
 				t.Errorf("[DONE] count=%d want 1: %q", n, body)
 			}
-			// error 帧必须原样保留 error 字段（未被 normalizeFrame 白名单剥掉）
+			// error 帧必须存在且 error 字段存活（未被 normalizeFrame 白名单剥掉）。
+			// 断言**结构**而非历史字面文案："empty upstream stream" 已按安全审计改为
+			// 中性文案（原文暴露"存在中转上游"这一架构事实）。
 			var e map[string]any
 			found := false
 			for _, ln := range strings.Split(body, "\n") {
@@ -708,7 +710,13 @@ func TestStreamEmptyFramesCase(t *testing.T) {
 						continue
 					}
 					if json.Unmarshal([]byte(payload), &e) == nil {
-						if em, ok := e["error"].(map[string]any); ok && em["message"] == "empty upstream stream" && em["type"] == "upstream_error" {
+						em, ok := e["error"].(map[string]any)
+						if !ok {
+							continue
+						}
+						msg, hasMsg := em["message"].(string)
+						_, hasType := em["type"].(string)
+						if hasMsg && hasType && msg != "" {
 							found = true
 						}
 					}
@@ -716,6 +724,10 @@ func TestStreamEmptyFramesCase(t *testing.T) {
 			}
 			if !found {
 				t.Errorf("error frame absent or error field stripped: %q", body)
+			}
+			// 审计：空流兜底帧不得出现架构措辞。
+			if strings.Contains(strings.ToLower(body), "upstream") {
+				t.Errorf("empty-stream frame must not disclose the relay architecture: %q", body)
 			}
 		})
 	}

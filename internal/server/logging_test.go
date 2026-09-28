@@ -260,8 +260,9 @@ func TestChatLogsErrorRow(t *testing.T) {
 		rec := httptest.NewRecorder()
 		req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"glm-5.2","messages":[]}`))
 		h.ServeHTTP(rec, req)
-		if rec.Code != 503 {
-			t.Fatalf("code=%d body=%s", rec.Code, rec.Body)
+		// 审计标准化：余额耗尽 → 503（有意不用 402，防 NewAPI 禁用渠道）。
+		if rec.Code != http.StatusServiceUnavailable {
+			t.Fatalf("code=%d body=%s want 503", rec.Code, rec.Body)
 		}
 	})
 	for _, want := range []string{"| u1 ", "| 503 |", "tok=-"} {
