@@ -225,3 +225,50 @@ func TestNewResponseIDShape(t *testing.T) {
 		seen[id] = true
 	}
 }
+
+// TestSanitizeUsageDropsNonStandardFields 白名单：把生产实测出现的非规范字段全部剥掉，
+// 只留 OpenAI 规范的三个顶层计数。
+func TestSanitizeUsageDropsNonStandardFields(t *testing.T) {
+	usage := map[string]any{
+		// 规范字段（保留）
+		"prompt_tokens":     527,
+		"completion_tokens": 16,
+		"total_tokens":      543,
+		// 审计实测的非规范字段（必须剥掉）
+		"prompt_cache_hit_tokens":     384,
+		"prompt_cache_miss_tokens":    143,
+		"prompt_cache_write_tokens":   0,
+		"cached_tokens":               0,
+		"cache_creation_input_tokens": 0,
+		"cache_read_input_tokens":     0,
+		"completion_thinking_tokens":  16,
+		"credit":                      0.01,
+		"prompt_tokens_details":       map[string]any{"cached_tokens": 384},
+		"completion_tokens_details":   map[string]any{"reasoning_tokens": 16},
+	}
+	got := SanitizeUsage(usage)
+	if len(got) != 3 {
+		t.Fatalf("usage=%v want only the 3 standard top-level keys", got)
+	}
+	for _, k := range []string{"prompt_tokens", "completion_tokens", "total_tokens"} {
+		if _, ok := got[k]; !ok {
+			t.Errorf("standard key %q must be kept", k)
+		}
+	}
+	for _, k := range []string{
+		"prompt_cache_hit_tokens", "prompt_cache_miss_tokens", "prompt_cache_write_tokens",
+		"cached_tokens", "cache_creation_input_tokens", "cache_read_input_tokens",
+		"completion_thinking_tokens", "credit", "prompt_tokens_details", "completion_tokens_details",
+	} {
+		if _, ok := got[k]; ok {
+			t.Errorf("non-standard key %q must be stripped", k)
+		}
+	}
+}
+
+// TestSanitizeUsageNil usage 缺失（nil）→ nil，不 panic、不造字段。
+func TestSanitizeUsageNil(t *testing.T) {
+	if got := SanitizeUsage(nil); got != nil {
+		t.Errorf("SanitizeUsage(nil)=%v want nil", got)
+	}
+}

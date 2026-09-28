@@ -469,8 +469,11 @@ func normalizeFrameSafe(obj map[string]any, clientModel string, sanitizeIDs bool
 		}
 		out["choices"] = nchs
 	}
-	if u, ok := obj["usage"]; ok {
-		out["usage"] = u
+	if u, ok := obj["usage"].(map[string]any); ok {
+		// 客户端面 usage 白名单裁剪（审计：上游在 usage 里塞 prompt_cache_hit_tokens /
+		// credit 等不规范字段，逐个都是后端身份指纹）。内部用量统计读的是上游原始
+		// 字节（chatStatsReader 包装在 Stream 之前），不受此改写影响。
+		out["usage"] = SanitizeUsage(u)
 	} else {
 		out["usage"] = nil
 	}

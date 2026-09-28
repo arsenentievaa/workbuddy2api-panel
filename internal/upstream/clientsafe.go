@@ -197,6 +197,49 @@ func LeaksInternal(text string, allow ...string) bool {
 	return false
 }
 
+// clientUsageKeys 是客户端面 usage 允许出现的顶层字段——OpenAI 规范的最小集。
+// 其余一律剥离：上游（DeepSeek 系）会在 usage 里塞大量自有字段，它们**不存在于
+// OpenAI/Anthropic 规范**，逐个出现即等于声明"后端不是你以为的那个模型"。
+//
+// 审计实测（生产响应）中被剥掉的字段：
+//
+//	prompt_cache_hit_tokens / prompt_cache_miss_tokens / prompt_cache_write_tokens
+//	cached_tokens（顶层；规范里只存在于 prompt_tokens_details 内）
+//	cache_creation_input_tokens / cache_read_input_tokens（Anthropic 命名，却出现在
+//	    OpenAI 形态响应里——同时穿帮两边）
+//	completion_thinking_tokens（上游思考计费字段）
+//	credit（上游计费单位）
+//	prompt_tokens_details / completion_tokens_details（嵌套明细：其数值由上游
+//	    缓存记账推导，语义上就是缓存命中账本；规范里是可选字段）
+//
+// 采用**白名单**而非黑名单：上游新增字段时默认被剥离，不必每次追着补名单。
+var clientUsageKeys = []string{"prompt_tokens", "completion_tokens", "total_tokens"}
+
+// SanitizeUsage 就地裁剪 usage，只保留 clientUsageKeys（返回同一 map 便于链式调用）。
+// nil 输入返回 nil。
+//
+// 调用方注意：必须在**内部台账取值之后**调用——上游的 credit（成本账本）与明细
+// 字段是内部计费依据，剥掉后无法再读。网关侧读原始流的 stats 不受影响（它读的是
+// 上游原始字节，不是这里改写后的 map）。
+func SanitizeUsage(usage map[string]any) map[string]any {
+	if usage == nil {
+		return nil
+	}
+	for k := range usage {
+		keep := false
+		for _, allowed := range clientUsageKeys {
+			if k == allowed {
+				keep = true
+				break
+			}
+		}
+		if !keep {
+			delete(usage, k)
+		}
+	}
+	return usage
+}
+
 // InternalLeakGuard 是发给客户端文本的最后一道闸：命中内部标记就整条替换为
 // generic。返回 (净化后的文本, 是否发生了替换) 便于调用方观测/打点。
 func InternalLeakGuard(text string, allow ...string) (string, bool) {

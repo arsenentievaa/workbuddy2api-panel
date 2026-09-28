@@ -935,18 +935,27 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		recordAttempt(acct.UID, usageDeltaFromResponse(resp), attemptStarted)
+		// 内部成本账本**先**取值：usage.credit 属于非标准字段，下一步剥离后就读不到了
+		// ——顺序颠倒会让 costTier 失去数据来源（审计发现的既有隐患）。
+		costCredit, costTokens, hasCost := usageCreditTotal(resp)
 		// 客户端面脱敏（安全审计）：model 回显**客户请求的**模型名；id 换成网关
-		// 自造值（去上游关联标识）；剥离后端部署指纹字段。上游真实模型名绝不出现。
+		// 自造值（去上游关联标识）；剥离后端部署指纹字段；usage 按规范白名单裁剪
+		// （上游的 prompt_cache_hit_tokens / prompt_cache_miss_tokens / credit /
+		// completion_thinking_tokens 等逐个都是后端身份指纹，且不存在于 OpenAI 与
+		// Anthropic 规范中）。
 		resp["model"] = clientModel
 		resp["id"] = upstream.NewResponseID()
 		delete(resp, "system_fingerprint")
 		delete(resp, "service_tier")
+		if u, ok := resp["usage"].(map[string]any); ok {
+			upstream.SanitizeUsage(u)
+		}
 		writeJSON(w, http.StatusOK, resp)
 		st.status = http.StatusOK
-		st.toks = completionTokens(resp)
-		// 成本账本（非流式）：从聚合响应的 usage 取 credit 与 token 总数。
-		if credit, total, ok := usageCreditTotal(resp); ok {
-			h.cfg.Pool.NoteModelCost(acct.UID, bareModel, credit, total)
+		st.toks = completionTokens(resp) // completion_tokens 在白名单内，剥离后仍可读
+		// 成本账本（非流式）：用剥离前捕获的值。
+		if hasCost {
+			h.cfg.Pool.NoteModelCost(acct.UID, bareModel, costCredit, costTokens)
 		}
 		return
 	}

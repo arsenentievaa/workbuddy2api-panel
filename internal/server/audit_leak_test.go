@@ -264,3 +264,125 @@ func TestErrorResponsesCarryNoInternalHeaders(t *testing.T) {
 		}
 	}
 }
+
+// sseUsageBackend 模拟上游真实流：usage 里塞满 DeepSeek 系非规范字段。
+const sseUsageBackend = "data: {\"id\":\"up-1\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"deepseek-v4.1-flash\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"hi\"}}]}\n\n" +
+	"data: {\"id\":\"up-1\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"deepseek-v4.1-flash\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":527,\"completion_tokens\":16,\"total_tokens\":543,\"prompt_cache_hit_tokens\":384,\"prompt_cache_miss_tokens\":143,\"prompt_cache_write_tokens\":0,\"cached_tokens\":0,\"cache_creation_input_tokens\":0,\"cache_read_input_tokens\":0,\"completion_thinking_tokens\":16,\"credit\":0.01,\"prompt_tokens_details\":{\"cached_tokens\":384},\"completion_tokens_details\":{\"reasoning_tokens\":16}}}\n\n" +
+	"data: [DONE]\n\n"
+
+// deepseekUsageFields 上游塞进 usage 的非规范字段（审计实测集合）。
+var deepseekUsageFields = []string{
+	"prompt_cache_hit_tokens", "prompt_cache_miss_tokens", "prompt_cache_write_tokens",
+	"cached_tokens", "cache_creation_input_tokens", "cache_read_input_tokens",
+	"completion_thinking_tokens", "credit", "prompt_tokens_details", "completion_tokens_details",
+}
+
+func assertUsageClean(t *testing.T, label string, usage map[string]any) {
+	t.Helper()
+	if usage == nil {
+		t.Fatalf("%s: usage absent", label)
+	}
+	if len(usage) != 3 {
+		t.Errorf("%s: usage keys=%v want exactly prompt_tokens/completion_tokens/total_tokens", label, usage)
+	}
+	for _, k := range []string{"prompt_tokens", "completion_tokens", "total_tokens"} {
+		if _, ok := usage[k]; !ok {
+			t.Errorf("%s: standard key %q missing", label, k)
+		}
+	}
+	for _, k := range deepseekUsageFields {
+		if _, ok := usage[k]; ok {
+			t.Errorf("%s: non-standard usage field %q leaked", label, k)
+		}
+	}
+}
+
+// TestNonStreamUsageHasNoDeepSeekFields 客户端信号 n°1：usage 里不得出现
+// prompt_cache_hit_tokens 等 DeepSeek 专有字段（非流式）。
+func TestNonStreamUsageHasNoDeepSeekFields(t *testing.T) {
+	up := newFakeUpstream(t, func(string) (int, string, bool) { return 200, sseUsageBackend, true })
+	h := NewHandler(Config{Pool: testPoolWith(&auth.Auth{UID: "u1", AccessToken: "at", ExpiresAt: 9999999999}), Upstream: up})
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest("POST", "/v1/chat/completions",
+		strings.NewReader(`{"model":"glm-5.2","messages":[{"role":"user","content":"hi"}]}`)))
+	if rec.Code != 200 {
+		t.Fatalf("code=%d body=%s", rec.Code, rec.Body)
+	}
+	body := rec.Body.String()
+	for _, k := range deepseekUsageFields {
+		if strings.Contains(body, k) {
+			t.Errorf("response body leaks usage field %q: %s", k, body)
+		}
+	}
+	var resp map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("bad json: %v", err)
+	}
+	usage, _ := resp["usage"].(map[string]any)
+	assertUsageClean(t, "non-stream", usage)
+}
+
+// TestStreamUsageHasNoDeepSeekFields 同上，流式：末帧 usage 也必须被裁剪。
+func TestStreamUsageHasNoDeepSeekFields(t *testing.T) {
+	up := newFakeUpstream(t, func(string) (int, string, bool) { return 200, sseUsageBackend, true })
+	h := NewHandler(Config{Pool: testPoolWith(&auth.Auth{UID: "u1", AccessToken: "at", ExpiresAt: 9999999999}), Upstream: up})
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest("POST", "/v1/chat/completions",
+		strings.NewReader(`{"model":"glm-5.2","stream":true,"messages":[{"role":"user","content":"hi"}]}`)))
+	body := rec.Body.String()
+	for _, k := range deepseekUsageFields {
+		if strings.Contains(body, k) {
+			t.Errorf("stream leaks usage field %q:\n%s", k, body)
+		}
+	}
+	seen := 0
+	for _, ln := range strings.Split(body, "\n") {
+		ln = strings.TrimSpace(ln)
+		if !strings.HasPrefix(ln, "data: ") {
+			continue
+		}
+		p := strings.TrimPrefix(ln, "data: ")
+		if p == "[DONE]" {
+			continue
+		}
+		var o map[string]any
+		if json.Unmarshal([]byte(p), &o) != nil {
+			continue
+		}
+		if u, ok := o["usage"].(map[string]any); ok {
+			assertUsageClean(t, "stream frame", u)
+			seen++
+		}
+	}
+	if seen == 0 {
+		t.Fatal("no frame carried usage — test is vacuous")
+	}
+}
+
+// TestCostLedgerStillReadsCreditBeforeStripping 内部台账优先：usage.credit 被剥掉
+// 之前必须先喂给成本账本，否则 costTier 失去数据来源（剥离顺序的回归守卫）。
+func TestCostLedgerStillReadsCreditBeforeStripping(t *testing.T) {
+	up := newFakeUpstream(t, func(string) (int, string, bool) { return 200, sseUsageBackend, true })
+	p := testPoolWith(&auth.Auth{UID: "u1", AccessToken: "at", ExpiresAt: 9999999999})
+	h := NewHandler(Config{Pool: p, Upstream: up})
+	// 让模型目录对该模型有认知，使 costTier 走 modelCostOf 分支。
+	render := func() {
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, httptest.NewRequest("POST", "/v1/chat/completions",
+			strings.NewReader(`{"model":"glm-5.2","messages":[{"role":"user","content":"hi"}]}`)))
+		if rec.Code != 200 {
+			t.Fatalf("code=%d", rec.Code)
+		}
+	}
+	render()
+	render() // 两次：EMA 需要观测
+	st, ok := p.Status("u1")
+	if !ok {
+		t.Fatal("status missing")
+	}
+	if len(st.ModelCosts) == 0 {
+		t.Fatalf("cost ledger lost its data source: usage.credit was stripped before being recorded (%+v)", st.ModelCosts)
+	}
+}
