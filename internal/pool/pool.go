@@ -50,6 +50,29 @@ type Pool struct {
 	// maxInFlightGlobal global 域单账号在途上限分档（WAF 403 修复 P1-1：global 域
 	// WAF 风控更紧，压低并发）；0 = 未设置，回落 maxInFlight（不分档，零回归）。
 	maxInFlightGlobal int
+	// 饱和排队（queue.go）：健康号全占满在途时的有界 FIFO 等待。
+	// queueMaxWaiters/queueMaxWait 任一 <= 0 = 队列关停（回落既有 503/兜底语义）。
+	queueMaxWaiters int
+	queueMaxWait    time.Duration
+	// waiters 按 realm 分域的 FIFO 登记表；表项退出后置 gone 惰性摘除。
+	// 队列关停时恒为空 → Release 的唤醒快路径（len 判空）零开销。
+	waiters map[string][]*waiter
+	// 队列计数（/status 观测；finishWaiter/WaitForSlot 在 p.mu 下自增。
+	// queueWaitTotal 是 admitted 的等待时长累加，供算平均）。
+	queueEpisodes  int64
+	queueAdmitted  int64
+	queueTimedOut  int64
+	queueRejected  int64
+	queueWaitTotal time.Duration
+	// pick 复用缓冲（性能关键路径，见 pick.go）：
+	// pickOrigin 全程持写锁 → 这些缓冲被单次 pick 独占，复用安全；按需增长、永不
+	// 缩小（内存上界 = 账号峰值数）。目的：把每请求的 O(账号数) 次分配降为 0。
+	//   pickWS      候选全表（过滤 + 分层结果），每请求重写前 len 段
+	//   pickTop     短名单输出缓冲（定长 pickShortlistSize）
+	//   pickWeights 加权抽签的权重缓冲（≤ 短名单长度）
+	pickWS      []weighted
+	pickTop     [pickShortlistSize]weighted
+	pickWeights []int64
 	// randInt64N 仅供测试注入确定性随机源；nil 时用 math/rand/v2 全局源。
 	// 生产代码不应设置此字段。
 	randInt64N func(n int64) int64
@@ -84,6 +107,9 @@ func New(stateFp string) *Pool {
 		// config 显式 "0" 关停（SetCostExploreInterval(0)）。
 		costExploreInterval: defaultCostExploreInterval,
 		exploreLast:         map[string]time.Time{},
+		// 队列零值 = 关停：Pool 不替调用方决定策略，真实默认值由 config.Default()
+		// 注入（SetQueue）。这样测试与未装配 config 的调用方拿到的都是既有行为。
+		waiters: map[string][]*waiter{},
 	}
 	if stateFp != "" {
 		p.load()
@@ -95,6 +121,8 @@ func New(stateFp string) *Pool {
 // Close 停止后台落盘 goroutine 并做最后一次落盘（幂等）。
 // 进程退出前调用，消除 startFlusher 的 goroutine 泄漏；不调用也不影响正确性
 // （进程退出即回收），仅是生命周期卫生。
+// 顺带唤醒所有饱和等待者：让它们尽快走到 ctx 取消/关停复核点退出，而不是拖到
+// 各自的等待预算耗尽（优雅停机时缩短排空时间）。
 func (p *Pool) Close() {
 	if p.stopCh == nil {
 		return
@@ -102,6 +130,9 @@ func (p *Pool) Close() {
 	p.closeOnce.Do(func() {
 		close(p.stopCh)
 	})
+	p.mu.Lock()
+	p.wakeAllLocked()
+	p.mu.Unlock()
 	p.Flush()
 }
 
@@ -187,11 +218,13 @@ func (p *Pool) SetDegrade(threshold int, cooldown, cooldownMax time.Duration) {
 }
 
 // SetMaxInFlight 注入单账号最大在途请求数；0 = 不限。负值保留原值。
+// 上限调高即容量增加 → 唤醒全部饱和等待者重新复核（拿不到名额的会继续等）。
 func (p *Pool) SetMaxInFlight(n int) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	if n >= 0 {
+	if n >= 0 && n != p.maxInFlight {
 		p.maxInFlight = n
+		p.wakeAllLocked()
 	}
 }
 
@@ -200,8 +233,9 @@ func (p *Pool) SetMaxInFlight(n int) {
 func (p *Pool) SetMaxInFlightGlobal(n int) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	if n >= 0 {
+	if n >= 0 && n != p.maxInFlightGlobal {
 		p.maxInFlightGlobal = n
+		p.wakeAllLocked()
 	}
 }
 
@@ -257,19 +291,39 @@ func (p *Pool) Acquire(uid string) bool {
 func (p *Pool) Release(uid string) {
 	p.mu.RLock()
 	e, ok := p.byUID[uid]
+	realm := ""
+	if ok {
+		realm = e.a.Realm()
+	}
 	p.mu.RUnlock()
 	if !ok {
 		return
 	}
+	released := false
 	for {
 		cur := e.inFlight.Load()
 		if cur <= 0 {
 			return
 		}
 		if e.inFlight.CompareAndSwap(cur, cur-1) {
-			return
+			released = true
+			break
 		}
 	}
+	if !released {
+		return
+	}
+	// 释放成功 → 唤醒该域队首的一个饱和等待者（queue.go）。队列关停时 waiters
+	// 恒空，此处的 len 判空就是全部开销（无写锁）——绝大多数请求走快路径返回。
+	p.mu.RLock()
+	pending := len(p.waiters[realm]) > 0
+	p.mu.RUnlock()
+	if !pending {
+		return
+	}
+	p.mu.Lock()
+	p.wakeLocked(realm)
+	p.mu.Unlock()
 }
 
 // SetRandomSource 仅供测试注入确定性随机源；生产代码不应调用。
@@ -281,10 +335,12 @@ func (p *Pool) SetRandomSource(fn func(n int64) int64) {
 }
 
 // Add 加入账号；已存在则保留原状态、更新凭证（upsert 单账号，不影响其他账号）。
+// 新增账号可能立刻带来名额 → 唤醒饱和等待者复核。
 func (p *Pool) Add(a *auth.Auth) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.upsertLocked(a)
+	p.wakeAllLocked()
 }
 
 // SyncToDir 用最新扫描结果对齐池：新账号加入、消失的账号剔除（状态保留）。
@@ -307,6 +363,8 @@ func (p *Pool) SyncToDir(auths []*auth.Auth) {
 	if changed {
 		p.saveLocked()
 	}
+	// 对齐可能带来新账号（容量增加）→ 唤醒饱和等待者复核。
+	p.wakeAllLocked()
 }
 
 // Remove 从池中移除账号并立即落盘（管理面板用）。返回被移除账号的凭证

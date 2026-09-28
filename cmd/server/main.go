@@ -100,6 +100,11 @@ func main() {
 	p.SetSoftRateMax(cfg.SoftRateMaxDur)                 // 软冷却指数退避封顶（soft_rate_max，默认 2h）
 	p.SetCostExploreInterval(cfg.CostExploreIntervalDur) // costTier 探索窗口（issue #136，默认 30m；0 关停）
 	p.SetWeights(cfg.Pool.IdleWeightPerHour, cfg.Pool.IdleWeightMax)
+	// 饱和排队（queue.go）：健康号全占满在途时的有界 FIFO 等待。任一参数为 0 = 关停。
+	p.SetQueue(pool.QueueConfig{
+		MaxWaiters: cfg.Pool.QueueMaxWaiters,
+		MaxWait:    cfg.QueueMaxWaitDur,
+	})
 
 	// 会话粘性路由（可配关闭）。
 	var sessRouter *session.Router
@@ -400,6 +405,10 @@ func saveConfig(raw []byte, path string, live *livecfg.Holder, p *pool.Pool, up 
 	p.SetSoftRateMax(newCfg.SoftRateMaxDur)
 	p.SetCostExploreInterval(newCfg.CostExploreIntervalDur) // costTier 探索窗口热生效（0 关停）
 	p.SetWeights(newCfg.Pool.IdleWeightPerHour, newCfg.Pool.IdleWeightMax)
+	p.SetQueue(pool.QueueConfig{ // 饱和排队参数热生效（0 = 关停，立即回落既有语义）
+		MaxWaiters: newCfg.Pool.QueueMaxWaiters,
+		MaxWait:    newCfg.QueueMaxWaitDur,
+	})
 	sch.Reconfigure(
 		newCfg.Schedule.CheckinHours, newCfg.Schedule.TravelHours,
 		newCfg.Schedule.ActivityHours, newCfg.Schedule.KeepaliveHours, newCfg.Schedule.BlackcatHours,

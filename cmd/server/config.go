@@ -145,6 +145,13 @@ type Config struct {
 		// 错误策略）。默认 "30m"（≤48 次/天/模型）；"0" 关停（完全回到现状行为）；
 		// 空值回落默认。
 		CostExploreInterval string `json:"cost_explore_interval"`
+		// 饱和排队（queue.go）：健康号全占满在途时的有界 FIFO 等待——不立刻 503，
+		// 也不把请求推给冷却兜底号。
+		//   QueueMaxWaiters 队深上限（并发等待的请求数）；0 = 关停排队。
+		//   QueueMaxWait   单请求总等待预算（跨多次排队累计，如 "30s"）；"0" = 关停。
+		// 任一为 0 即整体关停 → 立即回落既有「冷却兜底 / 503」语义（运维回滚开关）。
+		QueueMaxWaiters int    `json:"queue_max_waiters"` // 默认 200
+		QueueMaxWait    string `json:"queue_max_wait"`    // 默认 "30s"
 	} `json:"pool"`
 
 	SessionSticky struct {
@@ -166,6 +173,8 @@ type Config struct {
 	ExpiringSoonDur        time.Duration `json:"-"`
 	// CostExploreIntervalDur 解析后的 costTier 探索窗口（issue #136）；0 = 关停。
 	CostExploreIntervalDur time.Duration `json:"-"`
+	// QueueMaxWaitDur 解析后的排队等待预算；0 = 关停排队。
+	QueueMaxWaitDur time.Duration `json:"-"`
 }
 
 // Default 默认配置。
@@ -217,6 +226,11 @@ func Default() *Config {
 	c.Pool.ExpiringSoon = "168h" // 快过期窗口默认 7 天：官方活动奖励积分多在两周内过期
 	// costTier 探索默认 30m（issue #136：垄断破除 + 搭车改道零新增请求）；"0" 关停。
 	c.Pool.CostExploreInterval = "30m"
+	// 饱和排队默认开启：队深 200 / 单请求等待预算 30s。预算取值要点：必须明显小于
+	// NewAPI 对该渠道的客户端超时，否则请求在网关里等到超时、客户端先断线，等待
+	// 没有意义；30s 是「多数冷启动延迟能被吸收、又不易撞客户端超时」的折中。
+	c.Pool.QueueMaxWaiters = 200
+	c.Pool.QueueMaxWait = "30s"
 	c.SessionSticky.Enabled = true
 	c.SessionSticky.TTL = "30m"
 	c.SessionSticky.GCInterval = "5m"
@@ -420,6 +434,20 @@ func (c *Config) normalize() error {
 	}
 	if c.CostExploreIntervalDur < 0 {
 		c.CostExploreIntervalDur = 0
+	}
+	// 饱和排队参数：空值回落默认 30s；"0" 是合法值（关停，立即回落既有语义），
+	// 不回落；负值钳 0 同关停（"-5s" 无合理语义）。队深负值同钳 0（关停）。
+	if c.Pool.QueueMaxWait == "" {
+		c.Pool.QueueMaxWait = "30s"
+	}
+	if c.QueueMaxWaitDur, err = time.ParseDuration(c.Pool.QueueMaxWait); err != nil {
+		return fmt.Errorf("pool.queue_max_wait: %w", err)
+	}
+	if c.QueueMaxWaitDur < 0 {
+		c.QueueMaxWaitDur = 0
+	}
+	if c.Pool.QueueMaxWaiters < 0 {
+		c.Pool.QueueMaxWaiters = 0
 	}
 	if c.Pool.BreakerThreshold <= 0 {
 		c.Pool.BreakerThreshold = 3

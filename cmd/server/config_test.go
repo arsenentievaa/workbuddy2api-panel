@@ -719,3 +719,78 @@ func TestLoadConfigPathIsDirectory(t *testing.T) {
 		t.Errorf("error should suggest the fix (cp config.example.json): %v", err)
 	}
 }
+
+// TestQueueDefaults 饱和排队默认开启（队深 200 / 预算 30s）：缺该键的老 config 升级后
+// 即获得排队行为（这是本次特性的意图），关停靠显式 0。
+// 注意 Default() 只填**字符串**形态，Dur 由 normalize() 解析（与 breaker/degrade 等同
+// 约定），故生效值经 Load 断言。
+func TestQueueDefaults(t *testing.T) {
+	d := Default()
+	if d.Pool.QueueMaxWaiters != 200 || d.Pool.QueueMaxWait != "30s" {
+		t.Errorf("Default queue=%d/%q want 200/30s", d.Pool.QueueMaxWaiters, d.Pool.QueueMaxWait)
+	}
+	// 配置文件缺 queue 键 → 回落默认并解析成 30s（升级路径的行为）。
+	dir := t.TempDir()
+	fp := filepath.Join(dir, "c.json")
+	os.WriteFile(fp, []byte(`{"pool":{"max_in_flight":3}}`), 0o600)
+	c, err := Load(fp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Pool.QueueMaxWaiters != 200 || c.QueueMaxWaitDur != 30*time.Second {
+		t.Errorf("absent queue keys: %d/%v want 200/30s", c.Pool.QueueMaxWaiters, c.QueueMaxWaitDur)
+	}
+}
+
+// TestQueueParsedFromFile 文件显式值生效。
+func TestQueueParsedFromFile(t *testing.T) {
+	dir := t.TempDir()
+	fp := filepath.Join(dir, "c.json")
+	os.WriteFile(fp, []byte(`{"pool":{"queue_max_waiters":5,"queue_max_wait":"45s"}}`), 0o600)
+	c, err := Load(fp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Pool.QueueMaxWaiters != 5 || c.QueueMaxWaitDur != 45*time.Second {
+		t.Errorf("queue=%d/%v want 5/45s", c.Pool.QueueMaxWaiters, c.QueueMaxWaitDur)
+	}
+}
+
+// TestQueueKillSwitchZero "0" 是**合法值**（关停排队），不得被 normalize 回落成默认——
+// 否则运维的一键回滚开关失效（与 cost_explore_interval 的 0 语义同风格）。
+func TestQueueKillSwitchZero(t *testing.T) {
+	dir := t.TempDir()
+	fp := filepath.Join(dir, "c.json")
+	os.WriteFile(fp, []byte(`{"pool":{"queue_max_waiters":0,"queue_max_wait":"0"}}`), 0o600)
+	c, err := Load(fp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Pool.QueueMaxWaiters != 0 || c.QueueMaxWaitDur != 0 {
+		t.Errorf("kill switch lost: queue=%d/%v want 0/0", c.Pool.QueueMaxWaiters, c.QueueMaxWaitDur)
+	}
+}
+
+// TestQueueBadDuration 拼写错误 fail fast（不静默回落，避免"以为开了其实没开"）。
+func TestQueueBadDuration(t *testing.T) {
+	dir := t.TempDir()
+	fp := filepath.Join(dir, "c.json")
+	os.WriteFile(fp, []byte(`{"pool":{"queue_max_wait":"30 secondes"}}`), 0o600)
+	if _, err := Load(fp); err == nil {
+		t.Fatal("want error for unparsable queue_max_wait")
+	}
+}
+
+// TestQueueNegativeClamped 负值无合理语义 → 钳 0（= 关停），不留负数进调度。
+func TestQueueNegativeClamped(t *testing.T) {
+	dir := t.TempDir()
+	fp := filepath.Join(dir, "c.json")
+	os.WriteFile(fp, []byte(`{"pool":{"queue_max_waiters":-3,"queue_max_wait":"-5s"}}`), 0o600)
+	c, err := Load(fp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Pool.QueueMaxWaiters != 0 || c.QueueMaxWaitDur != 0 {
+		t.Errorf("negative values should clamp to 0: %d/%v", c.Pool.QueueMaxWaiters, c.QueueMaxWaitDur)
+	}
+}

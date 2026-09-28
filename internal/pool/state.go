@@ -66,6 +66,8 @@ func (p *Pool) ReviveDisabled(uid string) {
 		e.reason = ""
 		e.sessionDeadFails = 0
 		p.dirty.Store(true)
+		// 复活 = 容量增加 → 唤醒饱和等待者（queue.go）。
+		p.wakeAllLocked()
 	}
 }
 
@@ -91,6 +93,8 @@ func (p *Pool) Revive(uid string) bool {
 	e.retryCount = 0
 	e.breakerUntil = time.Time{}
 	p.dirty.Store(true)
+	// 解冻 = 容量增加 → 唤醒饱和等待者（queue.go）。
+	p.wakeAllLocked()
 	return true
 }
 
@@ -111,6 +115,8 @@ func (p *Pool) ReenableIfCredits(uid string, remain, total int64) {
 			e.creditsTotal = total
 		}
 		p.dirty.Store(true)
+		// 解冻（签到/余额刷新）= 容量可能增加 → 唤醒饱和等待者（queue.go）。
+		p.wakeAllLocked()
 	}
 }
 

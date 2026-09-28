@@ -199,6 +199,9 @@ func (h *Handler) status(w http.ResponseWriter, r *http.Request) {
 		},
 		"sticky_sessions": sticky,
 		"redis_mode":      redisMode,
+		// 饱和排队运行态（queue.go）：等待中请求数、队首等待时长、累计入队/获名额/
+		// 超时/队满计数。与 healthy/in_flight_full 对照即可判断「是没号还是只是占满」。
+		"queue": h.cfg.Pool.QueueStats(),
 		// cost_explore 事件与 per-model 时间戳（时间值由 encoding/json 写 RFC3339）。
 		"cost_explore": map[string]any{
 			"events_total": exploreEvents,
@@ -647,9 +650,16 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	}
 	chatMeta.TraceID = r.Header.Get("X-Trace-ID")
 
+	// 饱和排队（queue.go）：健康号全占满在途时，请求在 queue_max_wait_seconds 预算内
+	// 排队等名额，而不是立刻 503，也不把请求推给冷却兜底号。waitDeadline 惰性初始化
+	// （无排队时不付 time.Now 开销）；queueErr 供末端错误映射区分队满与等待超时。
+	var waitDeadline time.Time
+	var queueErr error
+
 	for i := 0; i < h.cfg.MaxRotate; i++ {
 		// 选号：粘性号优先（PickByUIDForModel 已校验该模型可用性 + 在途未满），否则普通轮换。
 		var acct *auth.Auth
+		fromFallback := false
 		if stickyUID != "" {
 			acct = h.cfg.Pool.PickByUIDForModel(stickyUID, bareModel)
 			if acct == nil || (realm != "" && acct.Realm() != realm) {
@@ -661,8 +671,30 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		}
 		if acct == nil {
 			// 模型感知 + realm 感知选号：模型非空时启用 6004 模型级冷却豁免
-			// （healthyForModel），realm 谓词过滤跨域账号。
-			acct = h.cfg.Pool.PickExcludingForRealm(tried, bareModel, realm)
+			// （healthyForModel），realm 谓词过滤跨域账号。带兜底来源标记：拿到的是
+			// 冷却兜底号时，若「容量是唯一瓶颈」应改走排队（推给冷却号只会加重限流）。
+			acct, fromFallback = h.cfg.Pool.PickExcludingForRealmOrigin(tried, bareModel, realm)
+		}
+		// 排队裁决：无号可发，或只拿到冷却兜底号。WaitableForModel 与 Pick 同谓词
+		// （tried + realm + 模型口径），等待判定为真 ⇒ 唤醒后 Pick 必能选出号，不空转。
+		// 队列关停（max_wait=0）时 WaitForSlot 立即返回 (false,nil)，此处自然回落到
+		// 既有「冷却兜底号 / 503」语义（零回归）。
+		if acct == nil || fromFallback {
+			if h.cfg.Pool.WaitableForModel(tried, bareModel, realm) {
+				if waitDeadline.IsZero() {
+					waitDeadline = time.Now().Add(h.cfg.Pool.QueueMaxWait())
+				}
+				waited, werr := h.cfg.Pool.WaitForSlot(r.Context(), tried, bareModel, realm, waitDeadline)
+				if werr != nil {
+					queueErr = werr
+					st.status = http.StatusServiceUnavailable
+					break
+				}
+				if waited {
+					i-- // 排队不消耗换号预算（总等待由 waitDeadline 独立封顶）
+					continue
+				}
+			}
 		}
 		if acct == nil {
 			st.status = http.StatusServiceUnavailable
@@ -911,9 +943,31 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		}
 		msg = upstream.MaskErrorMessage(ue.Kind)
 	}
+	// 饱和排队失败（本地调度类错误，无上游原文可透传）：独立 code + hint，让客户端与
+	// 运维能分辨「上游容量不足」与「网关队列已满 / 等太久」——两者处置完全不同
+	// （前者要等上游，后者要么扩容要么降载）。
+	if queueErr != nil {
+		switch {
+		case errors.Is(queueErr, pool.ErrQueueFull):
+			code = "queue_full"
+			msg = "gateway wait queue is full: every account is at its in-flight limit; retry later"
+			hint = queueFullHint
+		case errors.Is(queueErr, pool.ErrQueueTimeout):
+			code = "queue_timeout"
+			msg = "timed out waiting for a free upstream slot: every account is at its in-flight limit"
+			hint = queueTimeoutHint
+		}
+	}
 	writeOpenAIErrorHint(w, status, code, msg, hint)
 	st.status = status
 }
+
+// queueFullHint / queueTimeoutHint 是饱和排队的 gateway_hint（本地调度事实，
+// 与 upstream.noHealthyHint 同口径：不含上游字样，不编造原文）。
+const (
+	queueFullHint    = "gateway concurrency is saturated and the wait queue is full; the upstream pool has no free in-flight slot"
+	queueTimeoutHint = "gateway concurrency is saturated; the request waited for a free upstream slot and timed out"
+)
 
 // promptTooLongMessage 11115 透传 message：上游 body 原文（含真实 token 数/
 // 上限值/requestId，客户端自行排查）；空 body 兜底为可读分类短文案（不编造原文）。
