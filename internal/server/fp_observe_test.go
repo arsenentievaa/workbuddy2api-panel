@@ -30,7 +30,7 @@ func quietResult() fpdetect.Result {
 }
 
 func TestFPCountersEnregistreEtExpose(t *testing.T) {
-	c := NewFPCounters(20, true)
+	c := NewFPCounters(20, true, nil, 2)
 	now := time.Now()
 	c.Record("cli-1", routeResult(), now)
 	c.Record("cli-1", quietResult(), now)
@@ -54,7 +54,7 @@ func TestFPCountersEnregistreEtExpose(t *testing.T) {
 // TestPlafondHoraireParClient : les 20 premières décisions « router » du client
 // passent, la 21e est signalée comme plafonnée, et un autre client n'est pas affecté.
 func TestPlafondHoraireParClient(t *testing.T) {
-	c := NewFPCounters(20, true)
+	c := NewFPCounters(20, true, nil, 2)
 	now := time.Now()
 	for i := 0; i < 20; i++ {
 		if c.Record("cli-1", routeResult(), now) {
@@ -79,7 +79,7 @@ func TestPlafondHoraireParClient(t *testing.T) {
 
 // TestPlafondFenetreGlissante : le quota se libère au bout d'une heure.
 func TestPlafondFenetreGlissante(t *testing.T) {
-	c := NewFPCounters(2, true)
+	c := NewFPCounters(2, true, nil, 2)
 	now := time.Now()
 	c.Record("cli-1", routeResult(), now)
 	c.Record("cli-1", routeResult(), now)
@@ -95,7 +95,7 @@ func TestPlafondFenetreGlissante(t *testing.T) {
 // compte ces décisions à part au lieu de les imputer à un seau global, qui ferait
 // plafonner tous les clients à cause d'un seul bavard.
 func TestPlafondNonAttribuable(t *testing.T) {
-	c := NewFPCounters(1, true)
+	c := NewFPCounters(1, true, nil, 2)
 	now := time.Now()
 	for i := 0; i < 5; i++ {
 		if c.Record("", routeResult(), now) {
@@ -110,7 +110,7 @@ func TestPlafondNonAttribuable(t *testing.T) {
 
 // TestPlafondMemoireBornee : la table des clients ne grossit pas sans limite.
 func TestPlafondMemoireBornee(t *testing.T) {
-	c := NewFPCounters(20, true)
+	c := NewFPCounters(20, true, nil, 2)
 	now := time.Now()
 	for i := 0; i < fpCapMaxClients+200; i++ {
 		c.Record("cli-"+time.Duration(i).String(), routeResult(), now)
@@ -147,7 +147,7 @@ func TestObservationFailOpen(t *testing.T) {
 		return 200, sseOK, true
 	})
 	p := testPoolWith(&auth.Auth{UID: "u1", AccessToken: "at1", ExpiresAt: 9999999999})
-	counters := NewFPCounters(20, true)
+	counters := NewFPCounters(20, true, nil, 2)
 	h := NewHandler(Config{Pool: p, Upstream: up, FPDetect: fpdetect.New(fpdetect.DefaultConfig()), FPStats: counters})
 
 	rec := httptest.NewRecorder()
@@ -170,6 +170,37 @@ func TestObservationFailOpen(t *testing.T) {
 	}
 }
 
+// TestSignauxIgnoresSontJournalises : un signal conditionnel écarté doit produire une
+// trace distincte de la détection, sinon il est invisible dans le relevé.
+func TestSignauxIgnoresSontJournalises(t *testing.T) {
+	up := newFakeUpstream(t, func(authz string) (int, string, bool) { return 200, sseOK, true })
+	p := testPoolWith(&auth.Auth{UID: "u1", AccessToken: "at1", ExpiresAt: 9999999999})
+	counters := NewFPCounters(20, true, fpdetect.DefaultConfig().CorroborationSignals, 2)
+	h := NewHandler(Config{Pool: p, Upstream: up, FPDetect: fpdetect.New(fpdetect.DefaultConfig()), FPStats: counters})
+
+	// PDF joint seul : signal conditionnel, non corroboré.
+	body, _ := json.Marshal(map[string]any{
+		"model": "glm-5.2",
+		"messages": []any{map[string]any{"role": "user", "content": []any{
+			map[string]any{"type": "document", "source": map[string]any{"type": "base64", "media_type": "application/pdf", "data": "JVBERi0xLjQK"}},
+		}}},
+	})
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest("POST", "/v1/chat/completions", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	h.ServeHTTP(rec, req)
+	if rec.Code != 200 {
+		t.Fatalf("statut inattendu : %d", rec.Code)
+	}
+	s := counters.Snapshot()
+	if s["would_route"].(int64) != 0 {
+		t.Fatalf("un PDF seul ne doit pas compter comme reroutage : %v", s)
+	}
+	if s["ignored_signals"].(map[string]int64)[fpdetect.SigPDFContent] != 1 {
+		t.Fatalf("le signal ignoré doit être compté : %v", s)
+	}
+}
+
 // TestObservationPasseLeTraficNormalIntact : sur une requête ordinaire, le détecteur
 // ne compte aucun reroutage et la requête atteint l'amont.
 func TestObservationPasseLeTraficNormalIntact(t *testing.T) {
@@ -178,7 +209,7 @@ func TestObservationPasseLeTraficNormalIntact(t *testing.T) {
 		return 200, sseOK, true
 	})
 	p := testPoolWith(&auth.Auth{UID: "u1", AccessToken: "at1", ExpiresAt: 9999999999})
-	counters := NewFPCounters(20, true)
+	counters := NewFPCounters(20, true, nil, 2)
 	h := NewHandler(Config{Pool: p, Upstream: up, FPDetect: fpdetect.New(fpdetect.DefaultConfig()), FPStats: counters})
 
 	body, _ := json.Marshal(map[string]any{
@@ -232,7 +263,7 @@ func TestObservationActiveDansStatus(t *testing.T) {
 		Upstream: upstream.New(),
 		Live:     livecfg.New(livecfg.Snapshot{APIKey: dataKey, AdminAPIKey: adminKey}),
 		FPDetect: fpdetect.New(fpdetect.DefaultConfig()),
-		FPStats:  NewFPCounters(7, true),
+		FPStats:  NewFPCounters(7, true, []string{fpdetect.SigPDFContent}, 3),
 	})
 	rec := get(h, "/status", adminKey)
 	var out map[string]any
@@ -246,12 +277,46 @@ func TestObservationActiveDansStatus(t *testing.T) {
 	if fp["cap_per_hour_per_client"] != float64(7) || fp["dry_run"] != true {
 		t.Fatalf("réglages du plafond absents : %v", fp)
 	}
+	// La règle de corroboration doit être relisible depuis /status : sans elle, un
+	// relevé de plusieurs semaines n'est plus interprétable.
+	sigs, ok := fp["corroboration_signals"].([]any)
+	if !ok || len(sigs) != 1 || sigs[0] != fpdetect.SigPDFContent {
+		t.Fatalf("corroboration_signals absent ou inattendu : %v", fp["corroboration_signals"])
+	}
+	if fp["corroboration_weak_min"] != float64(3) {
+		t.Fatalf("corroboration_weak_min attendu à 3 : %v", fp["corroboration_weak_min"])
+	}
+	if _, ok := fp["ignored_signals"].(map[string]any); !ok {
+		t.Fatalf("ignored_signals attendu dans /status : %v", fp["ignored_signals"])
+	}
+}
+
+// TestSignauxIgnoresComptes : la mesure directe de ce que la corroboration évite.
+func TestSignauxIgnoresComptes(t *testing.T) {
+	c := NewFPCounters(20, true, []string{fpdetect.SigPDFContent, fpdetect.SigToolCountExtreme}, 2)
+	now := time.Now()
+	ignored := fpdetect.Result{
+		Score: 2, EffectiveScore: 0,
+		Signals: []fpdetect.Signal{{Name: fpdetect.SigPDFContent, Weight: 2, Ignored: true}},
+	}
+	c.Record("cli-1", ignored, now)
+	c.Record("cli-1", ignored, now)
+	c.Record("cli-1", routeResult(), now)
+
+	s := c.Snapshot()
+	ign := s["ignored_signals"].(map[string]int64)
+	if ign[fpdetect.SigPDFContent] != 2 {
+		t.Fatalf("signaux ignorés mal comptés : %v", ign)
+	}
+	if s["analyzed"].(int64) != 3 || s["would_route"].(int64) != 1 {
+		t.Fatalf("compteurs globaux inattendus : %v", s)
+	}
 }
 
 // TestObservationConcurrente vérifie qu'il n'y a pas de course sur les compteurs
 // (le chemin de requête est concurrent par nature).
 func TestObservationConcurrente(t *testing.T) {
-	c := NewFPCounters(1000000, true)
+	c := NewFPCounters(1000000, true, nil, 2)
 	now := time.Now()
 	var wg sync.WaitGroup
 	for i := 0; i < 32; i++ {

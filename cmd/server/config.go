@@ -189,6 +189,13 @@ type Config struct {
 		// Un code inconnu fait échouer le chargement (mieux qu'un faux sentiment de
 		// couverture).
 		Languages []string `json:"languages"`
+		// CorroborationSignals : signaux forts qui ne routent jamais seuls. Défaut :
+		// pdf_content, tool_count_extreme — les deux méthodes qui réagissent aussi au
+		// trafic légitime (un agent joint un PDF et déclare ses outils).
+		CorroborationSignals []string `json:"corroboration_signals"`
+		// CorroborationWeakMin : nombre minimal de signaux FAIBLES distincts requis,
+		// cumulés jusqu'au seuil, pour corroborer un signal conditionnel. Défaut 2.
+		CorroborationWeakMin int `json:"corroboration_weak_min"`
 	} `json:"fp_observe"`
 
 	SessionSticky struct {
@@ -276,6 +283,7 @@ func Default() *Config {
 	c.FPObserve.RepeatCount = 4
 	c.FPObserve.DryRun = true
 	c.FPObserve.MaxReroutesPerHour = 20
+	c.FPObserve.CorroborationWeakMin = 2
 	c.SessionSticky.Enabled = true
 	c.SessionSticky.TTL = "30m"
 	c.SessionSticky.GCInterval = "5m"
@@ -511,6 +519,12 @@ func (c *Config) normalize() error {
 	if c.FPObserve.MaxReroutesPerHour <= 0 {
 		c.FPObserve.MaxReroutesPerHour = 20
 	}
+	if c.FPObserve.CorroborationWeakMin < 1 {
+		c.FPObserve.CorroborationWeakMin = 2
+	}
+	if len(c.FPObserve.CorroborationSignals) == 0 {
+		c.FPObserve.CorroborationSignals = fpdetect.DefaultCorroborationSignals()
+	}
 	if len(c.FPObserve.Languages) == 0 {
 		c.FPObserve.Languages = fpdetect.SupportedLanguageCodes()
 	}
@@ -518,6 +532,14 @@ func (c *Config) normalize() error {
 		if !fpdetect.IsSupportedLanguage(code) {
 			return fmt.Errorf("fp_observe.languages: langue inconnue %q (connues : %s)",
 				code, strings.Join(fpdetect.SupportedLanguageCodes(), ", "))
+		}
+	}
+	// Un signal de corroboration doit être un signal fort : sinon la clé ne ferait
+	// rien et l'exploitant croirait avoir durci la règle.
+	for _, name := range c.FPObserve.CorroborationSignals {
+		if !fpdetect.IsStrongSignal(name) {
+			return fmt.Errorf("fp_observe.corroboration_signals: %q n'est pas un signal fort "+
+				"(connus : %s)", name, strings.Join(fpdetect.StrongSignalNames(), ", "))
 		}
 	}
 	if c.Pool.BreakerThreshold <= 0 {

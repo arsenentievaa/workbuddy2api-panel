@@ -534,7 +534,8 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	if h.cfg.FPDetect != nil {
 		fpKey := fpClientKey(body)
 		res := h.cfg.FPDetect.Analyze(body, fpKey)
-		if res.Route {
+		switch {
+		case res.Route:
 			// Le plafond n'est PAS appliqué en phase 1 (dry_run implicite) : on mesure
 			// ce qui serait plafonné, pour choisir la valeur avant d'activer.
 			capped := false
@@ -543,8 +544,19 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			}
 			log.Printf("[fp] SONDE DÉTECTÉE (observation seule, aucun reroutage) model=%s plafond_atteint=%v %s",
 				peek.Model, capped, res.Explain())
-		} else if h.cfg.FPStats != nil {
-			h.cfg.FPStats.Record(fpKey, res, time.Now())
+		case len(res.IgnoredNames()) > 0:
+			// Trace explicite de ce que la corroboration évite : sans cette ligne, un
+			// signal conditionnel écarté serait invisible et le relevé laisserait croire
+			// que la méthode n'a pas réagi.
+			if h.cfg.FPStats != nil {
+				h.cfg.FPStats.Record(fpKey, res, time.Now())
+			}
+			log.Printf("[fp] signal conditionnel IGNORÉ (non corroboré, aucun reroutage) model=%s %s",
+				peek.Model, res.Explain())
+		default:
+			if h.cfg.FPStats != nil {
+				h.cfg.FPStats.Record(fpKey, res, time.Now())
+			}
 		}
 	}
 
@@ -1063,6 +1075,16 @@ type FPCounters struct {
 	OverCap      int64                  // décisions au-delà du plafond
 	CappedClient map[string]bool        // clients ayant atteint le plafond
 	Unattributed int64                  // décisions sans clé de client : plafond inapplicable
+
+	// IgnoredSignals : nombre de signaux forts conditionnels écartés faute de
+	// corroboration, par nom. C'est la mesure directe de ce que la règle de
+	// corroboration a évité : chaque unité est une requête qui serait partie vers le
+	// modèle payant sous l'ancienne règle.
+	IgnoredSignals map[string]int64
+	// CorroborationSignals / CorroborationWeakMin : règle active, affichée par /status
+	// pour que le relevé reste interprétable des semaines plus tard.
+	CorroborationSignals []string
+	CorroborationWeakMin int
 }
 
 // fpCapWindow : fenêtre glissante du plafond anti-abus.
@@ -1072,17 +1094,23 @@ const fpCapWindow = time.Hour
 const fpCapMaxClients = 4096
 
 // NewFPCounters construit le compteur avec son plafond horaire (<=0 : plafond par
-// défaut) et l'état dry-run affiché par /status.
-func NewFPCounters(capPerHour int, dryRun bool) *FPCounters {
+// défaut), l'état dry-run et la règle de corroboration affichés par /status.
+func NewFPCounters(capPerHour int, dryRun bool, corroborationSignals []string, corroborationWeakMin int) *FPCounters {
 	if capPerHour <= 0 {
 		capPerHour = 20
 	}
+	if corroborationWeakMin < 1 {
+		corroborationWeakMin = 2
+	}
 	return &FPCounters{
-		BySignal:     map[string]int64{},
-		capPerHour:   capPerHour,
-		dryRun:       dryRun,
-		windows:      map[string][]time.Time{},
-		CappedClient: map[string]bool{},
+		BySignal:             map[string]int64{},
+		IgnoredSignals:       map[string]int64{},
+		capPerHour:           capPerHour,
+		dryRun:               dryRun,
+		CorroborationSignals: append([]string(nil), corroborationSignals...),
+		CorroborationWeakMin: corroborationWeakMin,
+		windows:              map[string][]time.Time{},
+		CappedClient:         map[string]bool{},
 	}
 }
 
@@ -1095,8 +1123,14 @@ func (c *FPCounters) Record(client string, r fpdetect.Result, now time.Time) boo
 		c.BySignal = map[string]int64{}
 	}
 	c.Total++
+	if c.IgnoredSignals == nil {
+		c.IgnoredSignals = map[string]int64{}
+	}
 	for _, s := range r.Signals {
 		c.BySignal[s.Name]++
+		if s.Ignored {
+			c.IgnoredSignals[s.Name]++
+		}
 	}
 	c.LastSeen = now.UTC().Format(time.RFC3339)
 	if !r.Route {
@@ -1161,9 +1195,16 @@ func (c *FPCounters) Snapshot() map[string]any {
 	for k, v := range c.BySignal {
 		by[k] = v
 	}
+	ign := make(map[string]int64, len(c.IgnoredSignals))
+	for k, v := range c.IgnoredSignals {
+		ign[k] = v
+	}
 	return map[string]any{
 		"analyzed": c.Total, "would_route": c.Routed,
 		"by_signal": by, "last_seen": c.LastSeen,
+		"ignored_signals":         ign,
+		"corroboration_signals":   c.CorroborationSignals,
+		"corroboration_weak_min":  c.CorroborationWeakMin,
 		"dry_run":                 c.dryRun,
 		"cap_per_hour_per_client": c.capPerHour,
 		"over_cap":                c.OverCap,

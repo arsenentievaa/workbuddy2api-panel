@@ -42,9 +42,16 @@ var defaultWeights = map[string]float64{
 	SigMassRepetition:    4.0,
 	SigRepetitionPattern: 4.0,
 	SigToolSuspicious:    4.0,
-	SigToolCountExtreme:  4.0,
-	SigPDFContent:        4.0,
 	SigRepeatRequest:     4.0,
+
+	// Sous le seuil À DESSEIN (4.0) : ces deux signaux sont « forts mais sujets à
+	// corroboration » (voir Config.CorroborationSignals). Le poids a été baissé de
+	// 4.0 à 2.0 après le relevé de production du 2026-09-29, où trois requêtes
+	// clientes réelles (un agent qui joint un PDF et déclare ses outils) les ont
+	// déclenchés ensemble. Un poids sous le seuil garantit qu'ils ne peuvent pas
+	// router par simple cumul de score : il faut la corroboration ci-dessous.
+	SigToolCountExtreme: 2.0,
+	SigPDFContent:       2.0,
 
 	SigVeryShort:       1.5,
 	SigRecentFact:      2.0,
@@ -52,16 +59,52 @@ var defaultWeights = map[string]float64{
 	SigThinkingRequest: 1.0,
 	SigSSEShape:        1.5,
 
-	SigCodingLike:       -3.0,
+	// coding_like passe de -3.0 à -4.0 avec le même relevé : c'est le seul signal qui
+	// distingue un agent de codage ordinaire d'une sonde, il doit donc pouvoir
+	// neutraliser à lui seul l'accumulation de faibles d'une vraie session de travail.
+	SigCodingLike:       -4.0,
 	SigLongConversation: -2.0,
 }
 
-// defaultStrong : un seul de ces signaux suffit à router. Ce sont les signaux
-// spécifiques — un jeton piège, une question d'identité, une consigne de répétition —
-// qui n'apparaissent pas dans un usage normal. Les autres sont FAIBLES parce que le
-// trafic réel les contient en masse : 65 % des requêtes mesurées en production
-// dépassent 50 000 tokens (profil agent), envoient couramment plus de 5 outils et
-// activent souvent le raisonnement étendu.
+// defaultCorroboration : signaux forts qui ne suffisent PAS seuls. Les deux méthodes
+// concernées (pièce jointe, volumétrie d'outils) font partie du fonctionnement normal
+// d'un agent : elles n'ont de valeur que corroborées par une méthode indépendante.
+var defaultCorroboration = []string{SigPDFContent, SigToolCountExtreme}
+
+// DefaultCorroborationSignals retourne la liste par défaut des signaux conditionnels.
+func DefaultCorroborationSignals() []string {
+	return append([]string(nil), defaultCorroboration...)
+}
+
+// StrongSignalNames retourne les signaux forts par défaut, triés (aide au diagnostic
+// de configuration et messages d'erreur).
+func StrongSignalNames() []string {
+	out := append([]string(nil), defaultStrong...)
+	sort.Strings(out)
+	return out
+}
+
+// IsStrongSignal : vrai si le nom est un signal fort par défaut.
+func IsStrongSignal(name string) bool {
+	for _, s := range defaultStrong {
+		if s == name {
+			return true
+		}
+	}
+	return false
+}
+
+// corroborationWeakMin : nombre minimal de signaux FAIBLES distincts pour corroborer
+// un signal conditionnel. Voir Config.CorroborationWeakMin pour la règle complète.
+const corroborationWeakMin = 2
+
+// defaultStrong : un seul de ces signaux suffit à router — SAUF s'il figure aussi
+// dans CorroborationSignals. Ce sont les signaux spécifiques — un jeton piège, une
+// question d'identité, une consigne de répétition — qui n'apparaissent pas dans un
+// usage normal. Les autres sont FAIBLES parce que le trafic réel les contient en
+// masse : 65 % des requêtes mesurées en production dépassent 50 000 tokens (profil
+// agent), envoient couramment plus de 5 outils et activent souvent le raisonnement
+// étendu.
 var defaultStrong = []string{
 	SigGlitchToken, SigModelQuestion, SigCutoffExplicit, SigMassRepetition,
 	SigRepetitionPattern, SigToolSuspicious, SigToolCountExtreme, SigPDFContent,
@@ -72,24 +115,45 @@ var defaultStrong = []string{
 type Config struct {
 	Threshold     float64            // seuil du score cumulé
 	Weights       map[string]float64 // surcharge des poids par nom de signal
-	StrongSignals []string           // signaux suffisants à eux seuls
+	StrongSignals []string           // signaux forts (voir CorroborationSignals)
 	GlitchTokens  []string           // liste effective (défaut : paquet + littérature)
 	GlitchMeta    map[string]string  // jeton -> famille de modèles (journalisation)
 	RepeatWindow  time.Duration      // fenêtre de détection de répétition (défaut 5 min)
 	RepeatCount   int                // nb de répétitions identiques déclenchant (défaut 4)
 	State         *State             // état partagé ; nil => état interne
+
+	// CorroborationSignals : sous-ensemble de StrongSignals qui ne route JAMAIS seul.
+	// Défaut : pdf_content, tool_count_extreme. Un tel signal est ignoré (ni score, ni
+	// décision) tant qu'il n'est pas corroboré, c'est-à-dire tant que :
+	//   - un signal fort NON conditionnel est présent (glitch_token, model_question,
+	//     cutoff_explicit, mass_repetition, repetition_pattern, tool_suspicious,
+	//     repeat_request) ; ou
+	//   - au moins CorroborationWeakMin signaux FAIBLES distincts sont présents ET
+	//     leur poids cumulé atteint le seuil.
+	//
+	// La seconde condition est une CONJONCTION, pas une disjonction. C'est ce qui
+	// répare le faux positif de production : la requête cliente observée cumulait
+	// recent_fact(2.0) + sse_shape(1.5) = 3.5, soit deux signaux faibles mais sous le
+	// seuil de 4.0. Une disjonction (« 2 faibles OU cumul atteignant le seuil »)
+	// l'aurait laissée router.
+	CorroborationSignals []string
+	// CorroborationWeakMin : nombre minimal de signaux faibles distincts requis pour
+	// la seconde branche ci-dessus (défaut 2, borne basse 1).
+	CorroborationWeakMin int
 }
 
 // DefaultConfig retourne la configuration par défaut, glitch tokens inclus.
 func DefaultConfig() Config {
 	return Config{
-		Threshold:     4.0,
-		Weights:       map[string]float64{},
-		StrongSignals: append([]string(nil), defaultStrong...),
-		GlitchTokens:  defaultGlitchStrings(),
-		GlitchMeta:    defaultGlitchMeta(),
-		RepeatWindow:  5 * time.Minute,
-		RepeatCount:   4,
+		Threshold:            4.0,
+		Weights:              map[string]float64{},
+		StrongSignals:        append([]string(nil), defaultStrong...),
+		CorroborationSignals: append([]string(nil), defaultCorroboration...),
+		CorroborationWeakMin: corroborationWeakMin,
+		GlitchTokens:         defaultGlitchStrings(),
+		GlitchMeta:           defaultGlitchMeta(),
+		RepeatWindow:         5 * time.Minute,
+		RepeatCount:          4,
 	}
 }
 
@@ -117,14 +181,20 @@ type Signal struct {
 	Name   string
 	Weight float64
 	Detail string
+	// Ignored : signal déclenché mais écarté de la décision faute de corroboration.
+	// Il reste visible pour l'observation (le panneau compte toujours la méthode qui
+	// a réagi), mais il ne pèse ni sur le score effectif ni sur le routage.
+	Ignored bool
 }
 
 // Result est le verdict d'analyse.
 type Result struct {
-	Score           float64
-	Signals         []Signal
-	Strong          string // nom du premier signal fort rencontré ("" si aucun)
-	Route           bool   // décision : envoyer vers le vrai modèle
+	Score           float64  // somme brute des poids de tous les signaux déclenchés
+	EffectiveScore  float64  // Score moins les signaux ignorés faute de corroboration
+	Signals         []Signal // tous les signaux déclenchés, y compris les ignorés
+	Strong          string   // signal fort DÉCISIF ("" si aucun ne décide du routage)
+	Route           bool     // décision : envoyer vers le vrai modèle
+	Corroborated    bool     // un signal conditionnel a-t-il été corroboré ?
 	UserChars       int
 	EstimatedTokens int
 	CodingLike      bool
@@ -135,6 +205,17 @@ func (r Result) SignalNames() []string {
 	out := make([]string, 0, len(r.Signals))
 	for _, s := range r.Signals {
 		out = append(out, s.Name)
+	}
+	return out
+}
+
+// IgnoredNames liste les signaux écartés faute de corroboration (ordre d'apparition).
+func (r Result) IgnoredNames() []string {
+	var out []string
+	for _, s := range r.Signals {
+		if s.Ignored {
+			out = append(out, s.Name)
+		}
 	}
 	return out
 }
@@ -150,26 +231,38 @@ func (r Result) has(name string) bool {
 
 // Explain produit une ligne de journal **sans jamais recopier le contenu** de la
 // requête : seuls les noms de signaux, leurs poids et des mesures agrégées.
+//
+// Un signal ignoré est marqué « ~ » : sans cette marque, un lecteur de journal
+// croirait que la méthode a suffi, et le relevé de calibration serait faux.
 func (r Result) Explain() string {
 	if len(r.Signals) == 0 {
 		return fmt.Sprintf("score=%.1f aucun signal", r.Score)
 	}
 	parts := make([]string, 0, len(r.Signals))
 	for _, s := range r.Signals {
-		parts = append(parts, fmt.Sprintf("%s(%+.1f)", s.Name, s.Weight))
+		mark := ""
+		if s.Ignored {
+			mark = "~"
+		}
+		parts = append(parts, fmt.Sprintf("%s%s(%+.1f)", mark, s.Name, s.Weight))
 	}
 	tag := ""
 	if r.Strong != "" {
 		tag = " fort=" + r.Strong
 	}
-	return fmt.Sprintf("score=%.1f [%s]%s", r.Score, strings.Join(parts, ", "), tag)
+	eff := ""
+	if r.EffectiveScore != r.Score {
+		eff = fmt.Sprintf(" effectif=%.1f", r.EffectiveScore)
+	}
+	return fmt.Sprintf("score=%.1f%s [%s]%s", r.Score, eff, strings.Join(parts, ", "), tag)
 }
 
 // Detector porte la configuration et l'état temporel.
 type Detector struct {
-	cfg    Config
-	strong map[string]bool
-	state  *State
+	cfg           Config
+	strong        map[string]bool
+	corroboration map[string]bool
+	state         *State
 }
 
 // New construit un détecteur. Les champs de Config absents retombent sur les défauts.
@@ -187,6 +280,12 @@ func New(cfg Config) *Detector {
 	if len(cfg.StrongSignals) == 0 {
 		cfg.StrongSignals = def.StrongSignals
 	}
+	if len(cfg.CorroborationSignals) == 0 {
+		cfg.CorroborationSignals = def.CorroborationSignals
+	}
+	if cfg.CorroborationWeakMin < 1 {
+		cfg.CorroborationWeakMin = def.CorroborationWeakMin
+	}
 	if len(cfg.GlitchTokens) == 0 {
 		cfg.GlitchTokens = def.GlitchTokens
 	}
@@ -197,10 +296,18 @@ func New(cfg Config) *Detector {
 	for _, s := range cfg.StrongSignals {
 		strong[s] = true
 	}
+	corroboration := make(map[string]bool, len(cfg.CorroborationSignals))
+	for _, s := range cfg.CorroborationSignals {
+		// Un signal de corroboration qui n'est pas fort n'a aucun sens : il ne serait
+		// de toute façon jamais décisif. On ne le retient que s'il est bien fort.
+		if strong[s] {
+			corroboration[s] = true
+		}
+	}
 	if cfg.State == nil {
 		cfg.State = NewState(cfg.RepeatWindow, 0, 0)
 	}
-	return &Detector{cfg: cfg, strong: strong, state: cfg.State}
+	return &Detector{cfg: cfg, strong: strong, corroboration: corroboration, state: cfg.State}
 }
 
 func (d *Detector) weight(name string) float64 {
@@ -227,6 +334,9 @@ func (d *Detector) AnalyzeAt(body []byte, clientKey string, now time.Time) Resul
 	fullLower := userLower + "\n" + strings.ToLower(system)
 
 	res := Result{UserChars: len(user), EstimatedTokens: estimateTokens(user)}
+	// add enregistre un signal déclenché. Il ne décide de rien : Strong et Route sont
+	// posés une seule fois, à la fin, par decide() — deux sources de vérité pour la
+	// décision finiraient par diverger.
 	add := func(name string, detail string) {
 		w := d.weight(name)
 		if w == 0 {
@@ -234,9 +344,6 @@ func (d *Detector) AnalyzeAt(body []byte, clientKey string, now time.Time) Resul
 		}
 		res.Signals = append(res.Signals, Signal{Name: name, Weight: w, Detail: detail})
 		res.Score += w
-		if d.strong[name] && res.Strong == "" {
-			res.Strong = name
-		}
 	}
 
 	// 1) Jetons pièges. Le détail ne recopie jamais le jeton (charge utile).
@@ -327,7 +434,7 @@ func (d *Detector) AnalyzeAt(body []byte, clientKey string, now time.Time) Resul
 	}
 
 	// Pénalités : indices de développement courant. Elles ne peuvent pas annuler un
-	// signal fort (voir le calcul de Route ci-dessous).
+	// signal fort décisif (voir le calcul de Route ci-dessous).
 	if isCodingLike(raw, user) {
 		res.CodingLike = true
 		add(SigCodingLike, "requête de développement/outils")
@@ -335,8 +442,71 @@ func (d *Detector) AnalyzeAt(body []byte, clientKey string, now time.Time) Resul
 		add(SigLongConversation, "échange conversationnel long")
 	}
 
-	res.Route = res.Strong != "" || res.Score >= d.cfg.Threshold
+	d.decide(&res)
 	return res
+}
+
+// decide applique la règle de corroboration puis la règle de score.
+//
+// Le principe : un signal fort CONDITIONNEL (aujourd'hui pdf_content et
+// tool_count_extreme) est une méthode qui réagit aussi au trafic légitime. Tant qu'il
+// n'est pas corroboré, il est IGNORÉ — retiré du score effectif et de la décision.
+// Sans cette mise à l'écart, le cumul du score le ferait router de toute façon avec
+// deux signaux faibles quelconques, et la corroboration ne serait qu'un commentaire.
+//
+//	faille évitée : pdf_content(2.0) + recent_fact(2.0) + sse_shape(1.5) = 5.5 >= 4.0
+//	                 routait alors que le signal conditionnel n'était pas corroboré.
+func (d *Detector) decide(res *Result) {
+	// Séparation des signaux. Les pénalités (poids négatif) ne comptent jamais comme
+	// corroboration : un indice de développement ne corrobore pas une sonde.
+	var decisiveStrong string
+	var conditional []int
+	weakCount := 0
+	weakSum := 0.0
+	for i, s := range res.Signals {
+		switch {
+		case d.corroboration[s.Name]:
+			conditional = append(conditional, i)
+		case d.strong[s.Name]:
+			// Signal fort inconditionnel : suffit seul, et corrobore les conditionnels.
+			if decisiveStrong == "" {
+				decisiveStrong = s.Name
+			}
+		case s.Weight > 0:
+			weakCount++
+			weakSum += s.Weight
+		}
+	}
+
+	// condition : un signal fort inconditionnel est présent, OU la conjonction
+	// « assez de signaux faibles distincts » ET « leur cumul atteint le seuil ».
+	condition := decisiveStrong != "" ||
+		(weakCount >= d.cfg.CorroborationWeakMin && weakSum >= d.cfg.Threshold)
+
+	// Corroborated ne parle que des signaux conditionnels : il vaut false tant qu'aucun
+	// n'est présent (une requête qui n'a que des signaux inconditionnels n'a rien à
+	// corroborer, et l'appelant ne doit pas croire qu'un arbitrage a eu lieu).
+	if len(conditional) == 0 {
+		res.Corroborated = false
+	} else {
+		res.Corroborated = condition
+		if condition {
+			// Le premier conditionnel corroboré devient le signal décisif affiché, si
+			// aucun signal inconditionnel n'était déjà décisif.
+			if decisiveStrong == "" {
+				decisiveStrong = res.Signals[conditional[0]].Name
+			}
+		} else {
+			for _, i := range conditional {
+				res.Signals[i].Ignored = true
+				res.EffectiveScore -= res.Signals[i].Weight
+			}
+		}
+	}
+
+	res.EffectiveScore += res.Score
+	res.Strong = decisiveStrong
+	res.Route = res.Strong != "" || res.EffectiveScore >= d.cfg.Threshold
 }
 
 // Analyze analyse avec l'horloge courante.

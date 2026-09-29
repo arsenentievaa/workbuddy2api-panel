@@ -93,6 +93,8 @@
     "repeat_count": 4,
     "dry_run": true,
     "max_reroutes_per_hour": 20,
-    "languages": ["ar", "de", "en", "es", "fr", "hi", "it", "ja", "ko", "nl", "pl", "pt", "ru", "tr", "vi", "zh-Hans", "zh-Hant"]
+    "languages": ["ar", "de", "en", "es", "fr", "hi", "it", "ja", "ko", "nl", "pl", "pt", "ru", "tr", "vi", "zh-Hans", "zh-Hant"],
+    "corroboration_signals": ["pdf_content", "tool_count_extreme"],
+    "corroboration_weak_min": 2
   }
 }

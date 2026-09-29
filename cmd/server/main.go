@@ -278,6 +278,10 @@ func main() {
 		if len(cfg.FPObserve.StrongSignals) > 0 {
 			fpCfg.StrongSignals = cfg.FPObserve.StrongSignals
 		}
+		if len(cfg.FPObserve.CorroborationSignals) > 0 {
+			fpCfg.CorroborationSignals = cfg.FPObserve.CorroborationSignals
+		}
+		fpCfg.CorroborationWeakMin = cfg.FPObserve.CorroborationWeakMin
 		if cfg.FPObserve.GlitchCSV != "" {
 			if toks, err := fpdetect.LoadGlitchCSV(cfg.FPObserve.GlitchCSV); err != nil {
 				log.Printf("fp_observe: %v — liste de jetons par défaut conservée", err)
@@ -293,17 +297,20 @@ func main() {
 			}
 		}
 		fpDet = fpdetect.New(fpCfg)
-		fpCounters = server.NewFPCounters(cfg.FPObserve.MaxReroutesPerHour, cfg.FPObserve.DryRun)
+		fpCounters = server.NewFPCounters(cfg.FPObserve.MaxReroutesPerHour, cfg.FPObserve.DryRun,
+			cfg.FPObserve.CorroborationSignals, cfg.FPObserve.CorroborationWeakMin)
 		// Les langues déclarées sont journalisées : c'est la trace vérifiable de la
 		// couverture annoncée, et le panneau relit la valeur dans /status.
 		labels := make([]string, 0, len(cfg.FPObserve.Languages))
 		for _, code := range cfg.FPObserve.Languages {
 			labels = append(labels, code+" ("+fpdetect.LanguageLabel(code)+")")
 		}
-		log.Printf("fp_observe: activé (OBSERVATION SEULE, aucun reroutage) seuil=%.1f jetons=%d signaux_forts=%d dry_run=%v plafond=%d/h/client langues=%d %s",
+		log.Printf("fp_observe: activé (OBSERVATION SEULE, aucun reroutage) seuil=%.1f jetons=%d signaux_forts=%d dry_run=%v plafond=%d/h/client langues=%d corroboration=%s(min %d faible(s)) %s",
 			fpCfg.Threshold, len(fpCfg.GlitchTokens), len(fpCfg.StrongSignals),
 			cfg.FPObserve.DryRun, cfg.FPObserve.MaxReroutesPerHour,
-			len(cfg.FPObserve.Languages), strings.Join(labels, ", "))
+			len(cfg.FPObserve.Languages),
+			strings.Join(cfg.FPObserve.CorroborationSignals, "+"), cfg.FPObserve.CorroborationWeakMin,
+			strings.Join(labels, ", "))
 	}
 
 	h := server.NewHandler(server.Config{

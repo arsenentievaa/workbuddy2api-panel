@@ -820,6 +820,40 @@ func TestFPObserveDefaults(t *testing.T) {
 	if len(c.FPObserve.Languages) != 17 {
 		t.Errorf("17 langues par défaut attendues, %d", len(c.FPObserve.Languages))
 	}
+	// Deux signaux conditionnels par défaut, et au moins 2 faibles requis.
+	if len(c.FPObserve.CorroborationSignals) != 2 {
+		t.Fatalf("2 signaux de corroboration attendus, %v", c.FPObserve.CorroborationSignals)
+	}
+	if c.FPObserve.CorroborationWeakMin != 2 {
+		t.Errorf("corroboration_weak_min=%d want 2", c.FPObserve.CorroborationWeakMin)
+	}
+}
+
+// TestFPObserveCorroborationSignalInconnu : un nom qui n'est pas un signal fort ne
+// durcirait rien tout en donnant l'illusion du contraire — refus au chargement.
+func TestFPObserveCorroborationSignalInconnu(t *testing.T) {
+	for _, mauvais := range []string{"signal_inexistant", "very_short"} {
+		dir := t.TempDir()
+		fp := filepath.Join(dir, "c.json")
+		os.WriteFile(fp, []byte(`{"fp_observe":{"enabled":true,"corroboration_signals":["`+mauvais+`"]}}`), 0o600)
+		if _, err := Load(fp); err == nil {
+			t.Fatalf("%q doit être refusé dans corroboration_signals", mauvais)
+		}
+	}
+}
+
+// TestFPObserveCorroborationFaibleMinRamasse : une valeur absurde retombe sur 2.
+func TestFPObserveCorroborationFaibleMinRamasse(t *testing.T) {
+	dir := t.TempDir()
+	fp := filepath.Join(dir, "c.json")
+	os.WriteFile(fp, []byte(`{"fp_observe":{"enabled":true,"corroboration_weak_min":0}}`), 0o600)
+	c, err := Load(fp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.FPObserve.CorroborationWeakMin != 2 {
+		t.Errorf("corroboration_weak_min=%d want 2", c.FPObserve.CorroborationWeakMin)
+	}
 }
 
 func TestFPObserveParsedFromFile(t *testing.T) {
@@ -828,7 +862,8 @@ func TestFPObserveParsedFromFile(t *testing.T) {
 	os.WriteFile(fp, []byte(`{"fp_observe":{"enabled":true,"threshold":2.5,
 		"dry_run":false,"max_reroutes_per_hour":3,"repeat_minutes":9,"repeat_count":7,
 		"strong_signals":["glitch_token"],"weights":{"very_short":3.5},
-		"glitch_csv":"/tmp/g.csv","languages":["fr","en"]}}`), 0o600)
+		"glitch_csv":"/tmp/g.csv","languages":["fr","en"],
+		"corroboration_signals":["pdf_content"],"corroboration_weak_min":4}}`), 0o600)
 	c, err := Load(fp)
 	if err != nil {
 		t.Fatal(err)
@@ -848,6 +883,12 @@ func TestFPObserveParsedFromFile(t *testing.T) {
 	}
 	if len(got.Languages) != 2 || got.Languages[0] != "fr" {
 		t.Fatalf("languages non repris : %v", got.Languages)
+	}
+	if len(got.CorroborationSignals) != 1 || got.CorroborationSignals[0] != "pdf_content" {
+		t.Fatalf("corroboration_signals non repris : %v", got.CorroborationSignals)
+	}
+	if got.CorroborationWeakMin != 4 {
+		t.Fatalf("corroboration_weak_min non repris : %d", got.CorroborationWeakMin)
 	}
 }
 

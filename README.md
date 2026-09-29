@@ -430,7 +430,9 @@ glitch token、身份提问、PDF、异常工具、重复请求…）。设计�
 | `fp_observe.enabled` | `false` | 开启观察（纯计算，无 I/O、无额外开销） |
 | `fp_observe.threshold` | `4.0` | 累计分数阈值 |
 | `fp_observe.weights` | `{}` | 按信号名覆盖权重 |
-| `fp_observe.strong_signals` | `[]` | 单独即可判定为探测的信号 |
+| `fp_observe.strong_signals` | `[]` | 强信号（其中可能含需被佐证的信号） |
+| `fp_observe.corroboration_signals` | `pdf_content`, `tool_count_extreme` | 单独**不足以**判定、必须有佐证的强信号；写错名字（非强信号）会导致加载失败 |
+| `fp_observe.corroboration_weak_min` | `2` | 佐证所需的**不同**弱信号个数（且其累计须达到阈值） |
 | `fp_observe.glitch_csv` | 空 | glitch-lens 格式的 CSV 路径（覆盖内置列表） |
 | `fp_observe.repeat_minutes` / `repeat_count` | `5` / `4` | 重复请求检测窗口与阈值 |
 | `fp_observe.dry_run` | `true` | 即使阶段 2 落地，`true` 也禁止任何请求发往真模型 |
@@ -439,9 +441,10 @@ glitch token、身份提问、PDF、异常工具、重复请求…）。设计�
 
 `/status` 的 `fp_observe` 除了 `analyzed` / `would_route` / `by_signal`，还给出
 `cap_per_hour_per_client`、`over_cap`（**本来会被**上限挡下的次数）、`capped_clients`、
-`unattributed`（无会话键、无法按客户端计量的次数）与 `dry_run`。阶段 1 不拦截任何
-请求：上限只用于**测量**，因为上限值必须在真实流量上校准——等重定向上线后再测就太晚，
-那时已经产生真模型的账单。
+`unattributed`（无会话键、无法按客户端计量的次数）、`ignored_signals`（因未获佐证而
+被剔除的强信号，按名字计数）、当前生效的 `corroboration_signals` /
+`corroboration_weak_min` 与 `dry_run`。阶段 1 不拦截任何请求：上限只用于**测量**，
+因为上限值必须在真实流量上校准——等重定向上线后再测就太晚，那时已经产生真模型的账单。
 
 语言覆盖是可验证的，不是声明式的：`internal/fpdetect/languages.go` 为每种语言保存
 一个必须在身份提问表中真实出现的样本片段，`TestCouvertureDesDixSeptLangues` 逐个
@@ -453,8 +456,33 @@ glitch token、身份提问、PDF、异常工具、重复请求…）。设计�
 50 000 tokens（agent 形态），「工具多于 5 个」或「启用 thinking」若单独判定，会把
 绝大多数正常客户流量送去昂贵的真模型。
 
+### 佐证规则（corroboration，2026-09-29 修订）
+
+有些方法**单独不构成证据**，因为它们在正常 agent 流量里也大量出现：附加 PDF 的请求、
+声明 25 个以上工具的请求。这类信号列在 `corroboration_signals` 里，未获佐证时被
+**整个剔除**——既不进有效分，也不参与判定，但在 `/status` 的 `ignored_signals` 和
+日志里仍然可见（日志写作 `[fp] signal conditionnel IGNORÉ`，`Explain()` 里以 `~` 标记）。
+
+佐证成立的条件（两者之一）：
+
+1. 存在一个**非条件性**强信号（glitch_token、model_question、cutoff_explicit、
+   mass_repetition、repetition_pattern、tool_suspicious、repeat_request）——它本身
+   已经足以路由；或
+2. 至少 `corroboration_weak_min` 个**不同的**弱信号，**且**它们的累计权重达到阈值。
+
+第 2 条是**合取**，不是析取。这一点很关键：被观测到的那条真实客户请求只有两个弱信号
+（recent_fact 2.0 + sse_shape 1.5 = 3.5，低于阈值 4.0）。若写成「2 个弱信号**或**累计
+达阈值」，它仍然会被送去付费模型——也就是说，析取式修不好这个假阳性。
+
+权重同时调整：`pdf_content` 与 `tool_count_extreme` 由 +4.0 降为 +2.0（低于阈值，
+因此不可能靠分数单独路由），`coding_like` 由 −3.0 降为 −4.0。后者的后果值得注意：
+**任何声明了 tools 的请求都会带上 coding_like 惩罚**（`isCodingLike` 的第一个判断就
+是 tools 非空），所以 agent 流量再也无法靠弱信号累积越线，必须有非条件性强信号才会
+改道。这正是想要的行为。
+
 **上线首日实测（2026-09-29，启用后 3 分钟内）**，共分析 29 条请求，其中 28 条判定为
-「本应重定向」。除我主动投递的探针外，出现了一个必须解决的假阳性：
+「本应重定向」。除我主动投递的探针外，出现了一个必须解决的假阳性（已由上述佐证规则
+修复）：
 
 ```
 model=deepseek-v4.1-flash score=8.5
@@ -466,9 +494,8 @@ model=deepseek-v4.1-flash score=8.5
 `tool_count_extreme` 与 `pdf_content`。也就是说：**agent 客户端附一个 PDF、声明
 25 个以上工具，在今天的权重下就会被送去付费的真模型**——`pdf_content` 与
 `tool_count_extreme` 作为「单独即可判定」的强信号在本租户的真实流量里站不住。
-`dry_run=true` 让这次观察没有产生任何账单。启用重定向前必须二选一：把这两个信号降为
-弱信号，或要求它们必须与其他探针特征共同出现（`internal/fpdetect/patterns.go` 的
-`toolCountSuspiciousMin` 注释里记了同样的结论）。
+`dry_run=true` 让这次观察没有产生任何账单。修复方式是**要求佐证**（见上）：两个信号
+被降为 +2.0 并列入 `corroboration_signals`，未获佐证即被剔除。
 
 ### 客户端面脱敏（安全审计 2026-09-28）
 
