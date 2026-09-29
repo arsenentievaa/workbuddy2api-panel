@@ -921,3 +921,101 @@ func TestFPObservePlafondNegatifRamasse(t *testing.T) {
 		t.Errorf("plafond=%d want 20", c.FPObserve.MaxReroutesPerHour)
 	}
 }
+
+// --- fp_route : reroutage vers l'upstream externe ---------------------------------
+
+func TestFPRouteDefaults(t *testing.T) {
+	c := Default()
+	if err := c.normalize(); err != nil {
+		t.Fatal(err)
+	}
+	fr := c.FPRoute
+	if fr.Enabled {
+		t.Error("le reroutage doit être désactivé par défaut")
+	}
+	if fr.BaseURL != "https://www.aiyoyoo.com" || fr.Path != "/v1/chat/completions" || fr.MessagesPath != "/v1/messages" {
+		t.Errorf("cibles par défaut: %+v", fr)
+	}
+	if fr.HealthPath != "/v1/models" || fr.HealthTTLSeconds != 300 {
+		t.Errorf("sonde de santé par défaut: %+v", fr)
+	}
+	if fr.Model != "claude-opus-5" || len(fr.ModelPrefixes) != 1 || fr.ModelPrefixes[0] != "claude-" {
+		t.Errorf("modèle par défaut: %+v", fr)
+	}
+	if fr.MaxPerHourPerToken != 20 || fr.MaxPerHourTotal != 100 {
+		t.Errorf("plafonds par défaut: %+v", fr)
+	}
+	if fr.MaxTokensCeiling != 8192 || fr.TimeoutSeconds != 60 {
+		t.Errorf("bornes par défaut: %+v", fr)
+	}
+	if fr.APIKey != "" || fr.APIKeyFile != "" {
+		t.Error("aucune clé ne doit être fournie par défaut")
+	}
+}
+
+// TestFPRouteExigeLaDetection : armer le reroutage sans détection serait un état
+// incohérent (rien ne serait jamais rerouté) — on refuse plutôt que de laisser croire
+// que c'est actif.
+func TestFPRouteExigeLaDetection(t *testing.T) {
+	dir := t.TempDir()
+	fp := filepath.Join(dir, "c.json")
+	os.WriteFile(fp, []byte(`{"fp_route":{"enabled":true},"fp_observe":{"enabled":false}}`), 0o600)
+	if _, err := Load(fp); err == nil {
+		t.Fatal("fp_route activé sans fp_observe doit échouer")
+	}
+	// Avec la détection, la même configuration passe.
+	os.WriteFile(fp, []byte(`{"fp_route":{"enabled":true},"fp_observe":{"enabled":true}}`), 0o600)
+	if _, err := Load(fp); err != nil {
+		t.Fatalf("détection + reroutage doit être accepté: %v", err)
+	}
+}
+
+func TestFPRouteDepuisFichier(t *testing.T) {
+	dir := t.TempDir()
+	fp := filepath.Join(dir, "c.json")
+	os.WriteFile(fp, []byte(`{"fp_observe":{"enabled":true},"fp_route":{
+		"enabled":true,"base_url":"https://exemple.test","path":"/v9/chat",
+		"messages_path":"/v9/messages","health_path":"/v9/models","health_ttl_seconds":60,
+		"model":"claude-sonnet-5","model_prefixes":["claude-","gpt-"],
+		"max_tokens_ceiling":1024,"api_key_file":"/tmp/cle.env","timeout_seconds":15,
+		"max_per_hour_per_token":3,"max_per_hour_total":9,
+		"rate_alert_percent":2.5,"rate_alert_min_sample":10}}`), 0o600)
+	c, err := Load(fp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fr := c.FPRoute
+	if !fr.Enabled || fr.BaseURL != "https://exemple.test" || fr.Path != "/v9/chat" || fr.MessagesPath != "/v9/messages" {
+		t.Fatalf("valeurs non reprises: %+v", fr)
+	}
+	if fr.HealthTTLSeconds != 60 || fr.Model != "claude-sonnet-5" || len(fr.ModelPrefixes) != 2 {
+		t.Fatalf("valeurs non reprises: %+v", fr)
+	}
+	if fr.MaxTokensCeiling != 1024 || fr.TimeoutSeconds != 15 || fr.MaxPerHourPerToken != 3 || fr.MaxPerHourTotal != 9 {
+		t.Fatalf("valeurs non reprises: %+v", fr)
+	}
+	if fr.APIKeyFile != "/tmp/cle.env" {
+		t.Fatalf("api_key_file non repris: %+v", fr)
+	}
+}
+
+func TestFPRouteEnvOverride(t *testing.T) {
+	t.Setenv("WB2A_FP_ROUTE_API_KEY", "sk-env-externe")
+	t.Setenv("WB2A_FP_ROUTE_BASE_URL", "https://env.exemple.test")
+	t.Setenv("WB2A_FP_ROUTE_ENABLED", "true")
+	c := Default()
+	applyEnv(c)
+	if c.FPRoute.APIKey != "sk-env-externe" || c.FPRoute.BaseURL != "https://env.exemple.test" || !c.FPRoute.Enabled {
+		t.Fatalf("surcharge par variables d'environnement non appliquée: %+v", c.FPRoute)
+	}
+}
+
+func TestTelegramEnvOverride(t *testing.T) {
+	t.Setenv("WB2A_TELEGRAM_BOT_TOKEN", "jeton")
+	t.Setenv("WB2A_TELEGRAM_CHAT_ID", "42")
+	c := Default()
+	applyEnv(c)
+	if c.Telegram.BotToken != "jeton" || c.Telegram.ChatID != "42" {
+		t.Fatalf("identifiants Telegram non repris: %+v", c.Telegram)
+	}
+}

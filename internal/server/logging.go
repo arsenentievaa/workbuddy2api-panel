@@ -40,6 +40,10 @@ type chatStat struct {
 	ttfb   time.Duration
 	toks   int // <0 表示 usage 缺失 → 显示 "-"
 	status int
+	// route marque une réponse servie hors du pool de comptes (reroutage d'une sonde
+	// vers l'upstream externe). Rendu dans la colonne compte, qui resterait sinon
+	// vide : une ligne sans compte doit s'expliquer d'elle-même.
+	route string
 
 	logged bool
 }
@@ -59,7 +63,7 @@ func (s *chatStat) done() {
 		return
 	}
 	s.logged = true
-	logChatRow(s.ttfb, time.Since(s.start), s.model, s.mode, s.uid, s.nick, s.status, s.toks)
+	logChatRow(s.ttfb, time.Since(s.start), s.model, s.mode, s.uid, s.nick, s.route, s.status, s.toks)
 }
 
 // chatStatsReader 在流式透传时抓取 SSE 末帧的 usage.completion_tokens 精确值，
@@ -285,14 +289,20 @@ const (
 //   - uid/nick：完整 uid 与账号昵称，经 logfmt.Label 拼成 "昵称(uid8)" 展示——只有
 //     uid8 时人眼无法判断是哪个号，要辨认必须再查 auths/，排障多一跳；
 //   - toks<0 表示 usage 缺失，显示 "-"。
-func logChatRow(ttfb, total time.Duration, model, mode, uid, nick string, status int, toks int) {
+func logChatRow(ttfb, total time.Duration, model, mode, uid, nick, route string, status int, toks int) {
 	if !chatLogEnabled {
 		return
 	}
 	seq := chatSeq.Add(1)
 	model = logfmt.Pad(logfmt.Truncate(model, chatModelWidth), chatModelWidth)
 	// 账号标签只补不截：超宽时宁可让该行变宽，也不丢昵称信息（昵称是排查的主线索）。
-	acct := logfmt.Pad(logfmt.Label(uid, nick), chatAcctWidth)
+	// route 非空 = 该响应并非由账号池中的账号提供（改道到外部上游），此时没有
+	// 账号可显示，用路由标记填充，避免出现一行「无来源」的日志。
+	acctLabel := logfmt.Label(uid, nick)
+	if route != "" {
+		acctLabel = route
+	}
+	acct := logfmt.Pad(acctLabel, chatAcctWidth)
 	tokField := "-"
 	tokpsField := "-"
 	if toks >= 0 {

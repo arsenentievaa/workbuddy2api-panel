@@ -13,6 +13,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/linguo2625469/workbuddy2api-panel/internal/alert"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/auth"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/fpdetect"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/httpauth"
@@ -48,13 +49,18 @@ type Config struct {
 	// nil 时回退静态字段（测试与裸用场景）。
 	Live *livecfg.Holder
 
-	// FPDetect détecteur de sondes de fingerprinting (phase 1 : observation).
-	// nil = observation désactivée (aucun coût). Quand il est fourni, chaque requête
-	// de complétion est analysée et la décision est journalisée — mais jamais
-	// appliquée : le reroutage vers le vrai modèle n'est pas implémenté.
+	// FPDetect détecteur de sondes de fingerprinting.
+	// nil = détection désactivée (aucun coût). Quand il est fourni, chaque requête de
+	// complétion est analysée ; la DÉCISION d'envoyer la sonde vers un upstream
+	// externe appartient à Rerouter (nil = phase 1, observation seule).
 	FPDetect *fpdetect.Detector
-	// FPStats compteurs d'observation (nil = pas de comptage).
+	// FPStats compteurs d'observation et plafond anti-abus (nil = pas de comptage).
 	FPStats *FPCounters
+	// Rerouter exécute le reroutage des sondes vers un upstream externe (phase 2).
+	// nil = aucun reroutage, quel que soit le verdict du détecteur.
+	Rerouter *Rerouter
+	// Alerts notifieur d'exploitation (nil = silencieux).
+	Alerts *alert.Notifier
 
 	// PromptMode "custom"（网关用自有提示词替换 system）/ "passthrough"（透传）。
 	PromptMode string
@@ -132,6 +138,9 @@ func NewHandler(cfg Config) *Handler {
 	}
 	h := &Handler{cfg: cfg, mux: http.NewServeMux()}
 	h.mux.HandleFunc("POST /v1/chat/completions", h.withAuth(h.chatCompletions))
+	// Surface Anthropic (Messages) : réservée aux sondes reroutées. Voir
+	// Handler.anthropicMessages pour le périmètre et sa justification.
+	h.mux.HandleFunc("POST /v1/messages", h.withAuth(h.anthropicMessages))
 	h.mux.HandleFunc("GET /v1/models", h.withAuth(h.models))
 	// /status 是**管理面**：它 dump 整个账号池（昵称/UID/积分/成本账本），
 	// 用管理密钥而非数据面密钥（审计：客户拿到自己的密钥不该看到池内部）。
@@ -241,6 +250,25 @@ func (h *Handler) status(w http.ResponseWriter, r *http.Request) {
 				return nil
 			}
 			return h.cfg.FPStats.Snapshot()
+		}(),
+		// fp_route : état du reroutage vers l'upstream externe. Absent si le reroutage
+		// n'est pas armé — le panneau distingue « pas de reroutage » de « reroutage
+		// configuré mais en échec ».
+		"fp_route": func() any {
+			if h.cfg.Rerouter == nil {
+				return nil
+			}
+			rr := h.cfg.Rerouter
+			return map[string]any{
+				"enabled":        rr.Enabled,
+				"dry_run":        rr.DryRun,
+				"health":         rr.Health.Snapshot(),
+				"model":          rr.Target.Path,
+				"model_cible":    rr.ModelDefault,
+				"plafond_part":   rr.Stats.CapPerHour(),
+				"plafond_global": rr.Stats.GlobalCapPerHour(),
+				"alertes":        h.alertStats(),
+			}
 		}(),
 		// cost_explore 事件与 per-model 时间戳（时间值由 encoding/json 写 RFC3339）。
 		"cost_explore": map[string]any{
@@ -531,32 +559,24 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	// Observation des sondes de fingerprinting (phase 1). Placée avant toute
 	// sélection de compte : elle doit voir le corps d'origine, et son échec ne doit
 	// jamais perturber la requête (fpdetect ne panique pas et ne fait aucune E/S).
+	var fpResult fpdetect.Result
+	fpIsProbe := false
 	if h.cfg.FPDetect != nil {
 		fpKey := fpClientKey(body)
-		res := h.cfg.FPDetect.Analyze(body, fpKey)
+		fpResult = h.cfg.FPDetect.Analyze(body, fpKey)
+		fpIsProbe = fpResult.Route
+		if h.cfg.FPStats != nil {
+			h.cfg.FPStats.Record(fpKey, fpResult, time.Now())
+		}
 		switch {
-		case res.Route:
-			// Le plafond n'est PAS appliqué en phase 1 (dry_run implicite) : on mesure
-			// ce qui serait plafonné, pour choisir la valeur avant d'activer.
-			capped := false
-			if h.cfg.FPStats != nil {
-				capped = h.cfg.FPStats.Record(fpKey, res, time.Now())
-			}
-			log.Printf("[fp] SONDE DÉTECTÉE (observation seule, aucun reroutage) model=%s plafond_atteint=%v %s",
-				peek.Model, capped, res.Explain())
-		case len(res.IgnoredNames()) > 0:
+		case fpResult.Route:
+			log.Printf("[fp] SONDE DÉTECTÉE model=%s %s", peek.Model, fpResult.Explain())
+		case len(fpResult.IgnoredNames()) > 0:
 			// Trace explicite de ce que la corroboration évite : sans cette ligne, un
 			// signal conditionnel écarté serait invisible et le relevé laisserait croire
 			// que la méthode n'a pas réagi.
-			if h.cfg.FPStats != nil {
-				h.cfg.FPStats.Record(fpKey, res, time.Now())
-			}
-			log.Printf("[fp] signal conditionnel IGNORÉ (non corroboré, aucun reroutage) model=%s %s",
-				peek.Model, res.Explain())
-		default:
-			if h.cfg.FPStats != nil {
-				h.cfg.FPStats.Record(fpKey, res, time.Now())
-			}
+			log.Printf("[fp] signal conditionnel IGNORÉ (non corroboré) model=%s %s",
+				peek.Model, fpResult.Explain())
 		}
 	}
 
@@ -687,6 +707,19 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	}
 	if origin := r.Header.Get("X-Origin-Model"); strings.HasPrefix(origin, "claude-") {
 		systemPrompt = prompt.Identity(prompt.ModelDisplayName(origin)) + h.cfg.PromptText
+	}
+
+	// Reroutage d'une sonde vers l'upstream externe (phase 2).
+	//
+	// Placé AVANT la réécriture du prompt et AVANT toute sélection de compte : le
+	// fournisseur externe doit recevoir la requête du client, pas notre version
+	// réécrite pour CodeBuddy, et surtout ce chemin ne doit consommer ni quota de
+	// compte, ni place dans le pool, ni liaison de session. Si le reroutage échoue, on
+	// poursuit simplement vers la boucle de comptes ci-dessous (fail-open).
+	if fpIsProbe && h.cfg.Rerouter != nil && h.cfg.Rerouter.Enabled {
+		if h.tryReroute(w, r, body, clientModel, peek.Stream, st) {
+			return
+		}
 	}
 	if h.cfg.PromptMode == "custom" && systemPrompt != "" {
 		body = prompt.Rewrite(body, systemPrompt)
@@ -1055,6 +1088,14 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	st.status = status
 }
 
+// alertStats expose l'état du notifieur sans secret (activé ou non, compteurs).
+func (h *Handler) alertStats() alert.Stats {
+	if h.cfg.Alerts == nil {
+		return alert.Stats{}
+	}
+	return h.cfg.Alerts.Stats()
+}
+
 // FPCounters agrège les décisions d'observation pour /status. Les noms de signaux
 // sont stables (fpdetect.SigXxx) : le panneau peut les afficher tels quels.
 //
@@ -1085,6 +1126,21 @@ type FPCounters struct {
 	// pour que le relevé reste interprétable des semaines plus tard.
 	CorroborationSignals []string
 	CorroborationWeakMin int
+
+	// --- exécution du reroutage (phase 2) ---------------------------------------
+	globalCapPerHour int
+	globalWindow     []time.Time
+	GlobalOverCap    int64
+	RerouteOK        int64
+	RerouteFailed    int64
+	CapBlocked       int64
+	GlobalCapBlocked int64
+	HealthBlocked    int64
+	// ReroutedKeys : nombre de seaux d'isolation distincts ayant consommé du quota.
+	// Expose la limite structurelle du plafond derrière NewAPI (une seule clé de
+	// données pour tous les clients) : si cette valeur reste à 1 alors que le trafic
+	// est varié, le plafond « par client » est en réalité global.
+	reroutedKeys map[string]struct{}
 }
 
 // fpCapWindow : fenêtre glissante du plafond anti-abus.
@@ -1095,9 +1151,12 @@ const fpCapMaxClients = 4096
 
 // NewFPCounters construit le compteur avec son plafond horaire (<=0 : plafond par
 // défaut), l'état dry-run et la règle de corroboration affichés par /status.
-func NewFPCounters(capPerHour int, dryRun bool, corroborationSignals []string, corroborationWeakMin int) *FPCounters {
+func NewFPCounters(capPerHour int, dryRun bool, corroborationSignals []string, corroborationWeakMin int, globalCapPerHour int) *FPCounters {
 	if capPerHour <= 0 {
 		capPerHour = 20
+	}
+	if globalCapPerHour <= 0 {
+		globalCapPerHour = 100
 	}
 	if corroborationWeakMin < 1 {
 		corroborationWeakMin = 2
@@ -1106,12 +1165,98 @@ func NewFPCounters(capPerHour int, dryRun bool, corroborationSignals []string, c
 		BySignal:             map[string]int64{},
 		IgnoredSignals:       map[string]int64{},
 		capPerHour:           capPerHour,
+		globalCapPerHour:     globalCapPerHour,
 		dryRun:               dryRun,
 		CorroborationSignals: append([]string(nil), corroborationSignals...),
 		CorroborationWeakMin: corroborationWeakMin,
 		windows:              map[string][]time.Time{},
 		CappedClient:         map[string]bool{},
+		reroutedKeys:         map[string]struct{}{},
 	}
+}
+
+// CapPerHour / GlobalCapPerHour : réglages courants, pour les messages d'alerte.
+func (c *FPCounters) CapPerHour() int       { return c.capPerHour }
+func (c *FPCounters) GlobalCapPerHour() int { return c.globalCapPerHour }
+
+// AllowReroute arbitre le plafond anti-abus et CONSOMME le quota quand il autorise.
+//
+// Le quota est consommé même en dry_run : c'est ce qui rend la mesure de la phase 1
+// directement comparable à l'application réelle. La consommation a lieu dans Decide(),
+// appelé juste avant l'appel externe — donc uniquement pour les requêtes qu'on
+// s'apprête réellement à rerouter, pas pour chaque sonde détectée.
+//
+// Retourne (autorisé, motif de refus).
+func (c *FPCounters) AllowReroute(key string, now time.Time) (bool, string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	// Plafond global d'abord : c'est le seul garde-fou qui résiste à la dégénérescence
+	// de l'isolation (tous les clients derrière une même clé de données).
+	c.globalWindow = pruneTimes(append(c.globalWindow, now), now.Add(-fpCapWindow))
+	if len(c.globalWindow) > c.globalCapPerHour {
+		c.GlobalOverCap++
+		c.GlobalCapBlocked++
+		return false, reasonCapGlobal
+	}
+	if key == "" {
+		// Sans identité attribuable, le plafond par client est inapplicable. On laisse
+		// passer sous la protection du plafond global, et on le compte : refuser
+		// ferait échouer des clients légitimes pour une limite qu'on ne sait pas
+		// mesurer.
+		c.Unattributed++
+		return true, ""
+	}
+	if c.windows == nil {
+		c.windows = map[string][]time.Time{}
+	}
+	if len(c.windows) >= fpCapMaxClients {
+		c.pruneWindows(now)
+	}
+	w := pruneTimes(c.windows[key], now.Add(-fpCapWindow))
+	w = append(w, now)
+	c.windows[key] = w
+	if len(w) > c.capPerHour {
+		c.OverCap++
+		c.CappedClient[key] = true
+		c.CapBlocked++
+		// Le refus a déjà consommé le créneau global : on le rend pour ne pas faire
+		// payer au reste du trafic une requête qui n'a pas été reroutée.
+		if n := len(c.globalWindow); n > 0 {
+			c.globalWindow = c.globalWindow[:n-1]
+		}
+		return false, reasonCapClient
+	}
+	if c.reroutedKeys != nil {
+		c.reroutedKeys[key] = struct{}{}
+	}
+	return true, ""
+}
+
+// NoteRerouteOK / NoteRerouteFailure / NoteHealthBlocked : compteurs d'exécution.
+func (c *FPCounters) NoteRerouteOK() {
+	c.mu.Lock()
+	c.RerouteOK++
+	c.mu.Unlock()
+}
+
+func (c *FPCounters) NoteRerouteFailure(status int) {
+	c.mu.Lock()
+	c.RerouteFailed++
+	c.mu.Unlock()
+}
+
+func (c *FPCounters) NoteHealthBlocked() {
+	c.mu.Lock()
+	c.HealthBlocked++
+	c.mu.Unlock()
+}
+
+// RateCounters retourne (total analysé, reroutages réussis) pour la surveillance du
+// taux de reroutage.
+func (c *FPCounters) RateCounters() (int64, int64) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.Total, c.RerouteOK
 }
 
 // Record enregistre une analyse pour le client donné (clé vide = non attribuable).
@@ -1137,26 +1282,11 @@ func (c *FPCounters) Record(client string, r fpdetect.Result, now time.Time) boo
 		return false
 	}
 	c.Routed++
-	if client == "" {
-		// Sans clé de session, aucun plafond n'est applicable : on le compte au lieu
-		// de retomber sur un seau global (un client bavard plafonnerait les autres).
-		c.Unattributed++
-		return false
-	}
-	if c.windows == nil {
-		c.windows = map[string][]time.Time{}
-	}
-	if len(c.windows) >= fpCapMaxClients {
-		c.pruneWindows(now)
-	}
-	w := pruneTimes(c.windows[client], now.Add(-fpCapWindow))
-	w = append(w, now)
-	c.windows[client] = w
-	if len(w) > c.capPerHour {
-		c.OverCap++
-		c.CappedClient[client] = true
-		return true
-	}
+	// Le plafond n'est PAS appliqué ici : Record ne fait que constater la décision de
+	// détection (analyzed / would_route / by_signal). L'application du plafond et la
+	// consommation du quota vivent dans AllowReroute, appelé seulement quand une
+	// requête est réellement sur le point d'être reroutée. Deux sources de vérité pour
+	// la même limite finiraient par diverger.
 	return false
 }
 
@@ -1207,9 +1337,16 @@ func (c *FPCounters) Snapshot() map[string]any {
 		"corroboration_weak_min":  c.CorroborationWeakMin,
 		"dry_run":                 c.dryRun,
 		"cap_per_hour_per_client": c.capPerHour,
+		"cap_per_hour_total":      c.globalCapPerHour,
 		"over_cap":                c.OverCap,
 		"capped_clients":          len(c.CappedClient),
 		"unattributed":            c.Unattributed,
+		"rerouted":                c.RerouteOK,
+		"reroute_failed":          c.RerouteFailed,
+		"cap_blocked":             c.CapBlocked,
+		"global_cap_blocked":      c.GlobalCapBlocked,
+		"health_blocked":          c.HealthBlocked,
+		"distinct_clients":        len(c.reroutedKeys),
 	}
 }
 

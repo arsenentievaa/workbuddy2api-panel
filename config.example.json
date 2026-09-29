@@ -96,5 +96,27 @@
     "languages": ["ar", "de", "en", "es", "fr", "hi", "it", "ja", "ko", "nl", "pl", "pt", "ru", "tr", "vi", "zh-Hans", "zh-Hant"],
     "corroboration_signals": ["pdf_content", "tool_count_extreme"],
     "corroboration_weak_min": 2
+  },
+  "fp_route": {
+    "enabled": false,
+    "base_url": "https://www.aiyoyoo.com",
+    "path": "/v1/chat/completions",
+    "messages_path": "/v1/messages",
+    "health_path": "/v1/models",
+    "health_ttl_seconds": 300,
+    "model": "claude-opus-5",
+    "model_prefixes": ["claude-"],
+    "max_tokens_ceiling": 8192,
+    "api_key": "",
+    "api_key_file": "",
+    "timeout_seconds": 60,
+    "max_per_hour_per_token": 20,
+    "max_per_hour_total": 100,
+    "rate_alert_percent": 5,
+    "rate_alert_min_sample": 50
+  },
+  "telegram": {
+    "bot_token": "",
+    "chat_id": ""
   }
 }

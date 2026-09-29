@@ -18,6 +18,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/linguo2625469/workbuddy2api-panel/internal/alert"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/auth"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/fpdetect"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/livecfg"
@@ -298,7 +299,8 @@ func main() {
 		}
 		fpDet = fpdetect.New(fpCfg)
 		fpCounters = server.NewFPCounters(cfg.FPObserve.MaxReroutesPerHour, cfg.FPObserve.DryRun,
-			cfg.FPObserve.CorroborationSignals, cfg.FPObserve.CorroborationWeakMin)
+			cfg.FPObserve.CorroborationSignals, cfg.FPObserve.CorroborationWeakMin,
+			cfg.FPRoute.MaxPerHourTotal)
 		// Les langues déclarées sont journalisées : c'est la trace vérifiable de la
 		// couverture annoncée, et le panneau relit la valeur dans /status.
 		labels := make([]string, 0, len(cfg.FPObserve.Languages))
@@ -311,6 +313,69 @@ func main() {
 			len(cfg.FPObserve.Languages),
 			strings.Join(cfg.FPObserve.CorroborationSignals, "+"), cfg.FPObserve.CorroborationWeakMin,
 			strings.Join(labels, ", "))
+	}
+
+	// Alertes d'exploitation (Telegram). Un déploiement sans identifiants garde un
+	// notifieur INERTE : aucune branche du code ne change de comportement.
+	tgToken, tgChat := alert.LoadFromEnv()
+	if cfg.Telegram.BotToken != "" {
+		tgToken = cfg.Telegram.BotToken
+	}
+	if cfg.Telegram.ChatID != "" {
+		tgChat = cfg.Telegram.ChatID
+	}
+	notifier := alert.New(tgToken, tgChat)
+	if notifier.Enabled() {
+		log.Printf("alertes Telegram: activées")
+	} else {
+		log.Printf("alertes Telegram: inactives (WB2A_TELEGRAM_BOT_TOKEN / WB2A_TELEGRAM_CHAT_ID absents)")
+	}
+
+	// Reroutage des sondes vers l'upstream externe (phase 2).
+	var rerouter *server.Rerouter
+	if cfg.FPRoute.Enabled {
+		key, kerr := upstream.LoadExternalAPIKey(cfg.FPRoute.APIKeyFile, cfg.FPRoute.APIKey)
+		if kerr != nil {
+			// Pas de clé : on DÉSACTIVE le reroutage au lieu de refuser de démarrer.
+			// Une passerelle qui ne démarre plus parce qu'une fonction annexe est mal
+			// configurée transformerait une erreur de configuration en panne totale.
+			// L'alerte et le journal rendent la situation impossible à manquer.
+			log.Printf("ERR: fp_route: %v — reroutage DÉSACTIVÉ (la route normale reste servie)", kerr)
+			notifier.Send(alert.KeyRerouteError, "⚠️ fp_route activé mais aucune clé d'upstream externe n'est lisible : le reroutage est DÉSACTIVÉ. Les sondes restent sur WorkBuddy.")
+		} else {
+			healthTTL := time.Duration(cfg.FPRoute.HealthTTLSeconds) * time.Second
+			rerouter = &server.Rerouter{
+				Enabled: true,
+				DryRun:  cfg.FPObserve.DryRun,
+				Target: upstream.ExternalTarget{
+					BaseURL: cfg.FPRoute.BaseURL,
+					Path:    cfg.FPRoute.Path,
+					APIKey:  key,
+					Timeout: time.Duration(cfg.FPRoute.TimeoutSeconds) * time.Second,
+				},
+				MessagesPath:     cfg.FPRoute.MessagesPath,
+				HealthPath:       cfg.FPRoute.HealthPath,
+				ModelDefault:     cfg.FPRoute.Model,
+				ModelPrefixes:    cfg.FPRoute.ModelPrefixes,
+				MaxTokensCeiling: cfg.FPRoute.MaxTokensCeiling,
+				RateAlertPercent: cfg.FPRoute.RateAlertPercent,
+				RateMinSample:    cfg.FPRoute.RateAlertMinSample,
+				Upstream:         up,
+				Health:           upstream.NewExternalHealth(healthTTL),
+				Stats:            fpCounters,
+				Alerts:           notifier,
+			}
+			state := "ARMÉ"
+			if cfg.FPObserve.DryRun {
+				state = "dry_run (aucun envoi réel)"
+			}
+			log.Printf("fp_route: activé [%s] base=%s chemin=%s modèle=%s santé=%s/%ds plafond=%d/h/client et %d/h total alertes_telegram=%v",
+				state, cfg.FPRoute.BaseURL, cfg.FPRoute.Path, cfg.FPRoute.Model,
+				cfg.FPRoute.HealthPath, cfg.FPRoute.HealthTTLSeconds,
+				cfg.FPRoute.MaxPerHourPerToken, cfg.FPRoute.MaxPerHourTotal, notifier.Enabled())
+		}
+	} else if fpDet != nil {
+		log.Printf("fp_route: désactivé (observation seule)")
 	}
 
 	h := server.NewHandler(server.Config{
@@ -330,11 +395,49 @@ func main() {
 		GlobalEnabled: cfg.Global.Enabled,
 		FPDetect:      fpDet,
 		FPStats:       fpCounters,
+		Rerouter:      rerouter,
+		Alerts:        notifier,
 	})
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	// Le notifieur démarre une fois ctx disponible : ses envois s'arrêtent avec le
+	// processus, sans jamais bloquer une requête.
+	notifier.Start(ctx)
 	go sch.Run(ctx)
+	// Surveillance périodique du reroutage : taux anormal et santé de l'upstream
+	// externe. Hors du chemin de requête, jamais bloquante. La sonde de santé est
+	// aussi appelée à la demande avant chaque reroutage (avec cache) — ce battement
+	// garantit qu'une panne est détectée même sans trafic de sonde.
+	if rerouter != nil {
+		go func() {
+			t := time.NewTicker(time.Minute)
+			defer t.Stop()
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-t.C:
+					rerouter.EvaluateRate()
+				}
+			}
+		}()
+	} else if fpCounters != nil {
+		go func() {
+			t := time.NewTicker(time.Minute)
+			defer t.Stop()
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-t.C:
+					// Sans reroutage actif, seule la surveillance de taux a un sens :
+					// elle mesure la pression de sondes, utile pour calibrer.
+					_ = notifier
+				}
+			}
+		}()
+	}
 	sch.StartBalanceRefresh(ctx, cfg.BalanceRefreshInterval)
 
 	srv := &http.Server{

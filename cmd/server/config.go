@@ -198,6 +198,59 @@ type Config struct {
 		CorroborationWeakMin int `json:"corroboration_weak_min"`
 	} `json:"fp_observe"`
 
+	// FPRoute : reroutage d'une sonde d'empreinte vers un upstream EXTERNE (phase 2).
+	//
+	// Deux verrous indépendants doivent être levés pour qu'une requête client parte
+	// vers le fournisseur payant : `fp_observe.enabled` (détecter) et ce bloc avec
+	// `fp_observe.dry_run=false` (agir). Un seul des deux ne suffit jamais.
+	FPRoute struct {
+		Enabled bool   `json:"enabled"`  // défaut false
+		BaseURL string `json:"base_url"` // défaut https://www.aiyoyoo.com
+		Path    string `json:"path"`     // défaut /v1/chat/completions
+		// MessagesPath : endpoint Messages (Anthropic) du même fournisseur, utilisé par
+		// la surface /v1/messages de la passerelle.
+		MessagesPath string `json:"messages_path"` // défaut /v1/messages
+		HealthPath   string `json:"health_path"`   // défaut /v1/models
+		// HealthTTLSeconds : durée de validité du verdict de la sonde. 0 ou absent => 300.
+		HealthTTLSeconds int `json:"health_ttl_seconds"`
+		// Model : modèle demandé au fournisseur quand la requête n'en nomme pas un qu'il
+		// connaît. Un nom de modèle CodeBuddy n'existe pas chez lui.
+		Model string `json:"model"` // défaut claude-opus-5
+		// ModelPrefixes : préfixes transmis tels quels (le client a demandé un modèle
+		// réel du fournisseur externe).
+		ModelPrefixes []string `json:"model_prefixes"` // défaut ["claude-"]
+		// MaxTokensCeiling : borne haute des max_tokens d'une requête reroutée. Une
+		// sonde qui demande 200 000 jetons de sortie se facture au prix du vrai modèle.
+		MaxTokensCeiling int64 `json:"max_tokens_ceiling"` // défaut 8192
+		// APIKey / APIKeyFile : la clé du fournisseur externe. Le fichier accepte la clé
+		// seule ou un fichier d'environnement (format real-claude.env). Elle n'est JAMAIS
+		// journalisée ; la préférer en variable d'environnement (WB2A_FP_ROUTE_API_KEY)
+		// pour ne pas la faire entrer dans les sauvegardes de configuration.
+		APIKey     string `json:"api_key"`
+		APIKeyFile string `json:"api_key_file"`
+		// TimeoutSeconds : délai d'un appel externe. Court À DESSEIN : un repli qui
+		// arrive après 2 minutes n'est pas un service.
+		TimeoutSeconds int `json:"timeout_seconds"` // défaut 60
+		// MaxPerHourPerToken : plafond anti-abus par client (voir rerouteIdentity pour
+		// ce que « client » signifie réellement derrière NewAPI).
+		MaxPerHourPerToken int `json:"max_per_hour_per_token"` // défaut 20
+		// MaxPerHourTotal : plafond global, seul garde-fou qui résiste à la
+		// dégénérescence de l'isolation par client.
+		MaxPerHourTotal int `json:"max_per_hour_total"` // défaut 100
+		// RateAlertPercent / RateAlertMinSample : surveillance du taux de reroutage.
+		RateAlertPercent   float64 `json:"rate_alert_percent"`    // défaut 5
+		RateAlertMinSample int64   `json:"rate_alert_min_sample"` // défaut 50
+	} `json:"fp_route"`
+
+	// Telegram : alertes d'exploitation. Les identifiants peuvent aussi venir des
+	// variables d'environnement WB2A_TELEGRAM_BOT_TOKEN / WB2A_TELEGRAM_CHAT_ID (ou
+	// TELEGRAM_*), qui sont la voie recommandée : le jeton n'entre alors pas dans les
+	// sauvegardes de configuration.
+	Telegram struct {
+		BotToken string `json:"bot_token"`
+		ChatID   string `json:"chat_id"`
+	} `json:"telegram"`
+
 	SessionSticky struct {
 		Enabled    bool   `json:"enabled"`     // 默认 true
 		TTL        string `json:"ttl"`         // 会话绑定 TTL，默认 "30m"
@@ -284,6 +337,23 @@ func Default() *Config {
 	c.FPObserve.DryRun = true
 	c.FPObserve.MaxReroutesPerHour = 20
 	c.FPObserve.CorroborationWeakMin = 2
+
+	// fp_route : reroutage désactivé par défaut. Le base URL et le modèle par défaut
+	// sont ceux vérifiés le 2026-09-29 (GET /v1/models et POST sur les deux endpoints).
+	c.FPRoute.Enabled = false
+	c.FPRoute.BaseURL = "https://www.aiyoyoo.com"
+	c.FPRoute.Path = "/v1/chat/completions"
+	c.FPRoute.MessagesPath = "/v1/messages"
+	c.FPRoute.HealthPath = "/v1/models"
+	c.FPRoute.HealthTTLSeconds = 300
+	c.FPRoute.Model = "claude-opus-5"
+	c.FPRoute.ModelPrefixes = []string{"claude-"}
+	c.FPRoute.MaxTokensCeiling = 8192
+	c.FPRoute.TimeoutSeconds = 60
+	c.FPRoute.MaxPerHourPerToken = 20
+	c.FPRoute.MaxPerHourTotal = 100
+	c.FPRoute.RateAlertPercent = 5
+	c.FPRoute.RateAlertMinSample = 50
 	c.SessionSticky.Enabled = true
 	c.SessionSticky.TTL = "30m"
 	c.SessionSticky.GCInterval = "5m"
@@ -378,6 +448,23 @@ func applyEnv(c *Config) {
 	// 配置文件，在部署平台加环境变量重启即可）。
 	if v := os.Getenv("WB2A_ADMIN_API_KEY"); v != "" {
 		c.AdminAPIKey = v
+	}
+	// Clé du fournisseur externe : voie recommandée, elle ne transite alors pas par le
+	// fichier de configuration (donc pas par les sauvegardes).
+	if v := os.Getenv("WB2A_FP_ROUTE_API_KEY"); v != "" {
+		c.FPRoute.APIKey = v
+	}
+	if v := os.Getenv("WB2A_FP_ROUTE_BASE_URL"); v != "" {
+		c.FPRoute.BaseURL = v
+	}
+	if v := os.Getenv("WB2A_FP_ROUTE_ENABLED"); v != "" {
+		c.FPRoute.Enabled = v == "1" || strings.EqualFold(v, "true")
+	}
+	if v := os.Getenv("WB2A_TELEGRAM_BOT_TOKEN"); v != "" {
+		c.Telegram.BotToken = v
+	}
+	if v := os.Getenv("WB2A_TELEGRAM_CHAT_ID"); v != "" {
+		c.Telegram.ChatID = v
 	}
 	if v := os.Getenv("WB2A_AUTH_DIR"); v != "" {
 		c.AuthDir = v
@@ -534,6 +621,53 @@ func (c *Config) normalize() error {
 				code, strings.Join(fpdetect.SupportedLanguageCodes(), ", "))
 		}
 	}
+	// --- fp_route ---------------------------------------------------------------
+	if c.FPRoute.BaseURL == "" {
+		c.FPRoute.BaseURL = "https://www.aiyoyoo.com"
+	}
+	if c.FPRoute.Path == "" {
+		c.FPRoute.Path = "/v1/chat/completions"
+	}
+	if c.FPRoute.MessagesPath == "" {
+		c.FPRoute.MessagesPath = "/v1/messages"
+	}
+	if c.FPRoute.HealthPath == "" {
+		c.FPRoute.HealthPath = "/v1/models"
+	}
+	if c.FPRoute.HealthTTLSeconds <= 0 {
+		c.FPRoute.HealthTTLSeconds = 300
+	}
+	if c.FPRoute.Model == "" {
+		c.FPRoute.Model = "claude-opus-5"
+	}
+	if len(c.FPRoute.ModelPrefixes) == 0 {
+		c.FPRoute.ModelPrefixes = []string{"claude-"}
+	}
+	if c.FPRoute.MaxTokensCeiling <= 0 {
+		c.FPRoute.MaxTokensCeiling = 8192
+	}
+	if c.FPRoute.TimeoutSeconds <= 0 {
+		c.FPRoute.TimeoutSeconds = 60
+	}
+	if c.FPRoute.MaxPerHourPerToken <= 0 {
+		c.FPRoute.MaxPerHourPerToken = 20
+	}
+	if c.FPRoute.MaxPerHourTotal <= 0 {
+		c.FPRoute.MaxPerHourTotal = 100
+	}
+	if c.FPRoute.RateAlertPercent <= 0 {
+		c.FPRoute.RateAlertPercent = 5
+	}
+	if c.FPRoute.RateAlertMinSample <= 0 {
+		c.FPRoute.RateAlertMinSample = 50
+	}
+	// Le reroutage exige d'avoir détecté : une cible configurée sans détection ne
+	// ferait rien, et le laisser croire activé serait le pire des états.
+	if c.FPRoute.Enabled && !c.FPObserve.Enabled {
+		return fmt.Errorf("fp_route.enabled=true exige fp_observe.enabled=true " +
+			"(sans détection, aucun reroutage ne peut avoir lieu)")
+	}
+
 	// Un signal de corroboration doit être un signal fort : sinon la clé ne ferait
 	// rien et l'exploitant croirait avoir durci la règle.
 	for _, name := range c.FPObserve.CorroborationSignals {

@@ -516,6 +516,61 @@ model=deepseek-v4.1-flash score=8.5
 
 `would_route=2`（只有两个真探针），`ignored_signals={pdf_content:1, tool_count_extreme:2}`。
 
+### 探针改道（fp_route，阶段 2）
+
+检测到探针后，**不再由 WorkBuddy 回答，而是转发给外部上游**（CrazyToken，真实
+Claude）。这是与正常路径**并行**的一条路，不是正常路径的一个分支：改道不碰账号池、
+不碰计费、不碰会话粘性。
+
+| 键 | 默认 | 说明 |
+|---|---|---|
+| `fp_route.enabled` | `false` | 开启改道；`true` 时若 `fp_observe.enabled=false` 直接加载失败 |
+| `fp_route.base_url` / `path` | `https://www.aiyoyoo.com` / `/v1/chat/completions` | 外部上游 |
+| `fp_route.messages_path` | `/v1/messages` | 同一上游的消息（Anthropic）端点 |
+| `fp_route.health_path` / `health_ttl_seconds` | `/v1/models` / `300` | 健康探针及其缓存有效期 |
+| `fp_route.model` | `claude-opus-5` | 客户端未指定上游已知模型时使用的模型 |
+| `fp_route.model_prefixes` | `["claude-"]` | 原样转发的模型名前缀 |
+| `fp_route.max_tokens_ceiling` | `8192` | 改道请求的 max_tokens 上限（探针是测试，不是订单） |
+| `fp_route.api_key` / `api_key_file` | 空 | 外部上游密钥；推荐用文档外的 `api_key_file`（600） |
+| `fp_route.timeout_seconds` | `60` | 外部调用超时 |
+| `fp_route.max_per_hour_per_token` | `20` | 每客户端每小时改道上限 |
+| `fp_route.max_per_hour_total` | `100` | **全局**每小时改道上限 |
+| `fp_route.rate_alert_percent` / `rate_alert_min_sample` | `5` / `50` | 改道率告警阈值 |
+
+两个独立的闸必须同时打开才会真正改道：`fp_observe.enabled`（检测）与
+`fp_observe.dry_run=false`（执行）。`dry_run=true` 时外部上游**连探针都不发**——「不
+真实发送」指的是没有任何一个包出网，而不只是「不计费」。
+
+**失败一律回退（fail-open）**。配置不全、健康探针不通过、触发上限、连接失败、上游
+返回非 2xx、响应无法解析——每一种情况都让请求回到正常路径。改道路径不调用
+`recordAttempt` / `applyErrorPolicy` / `fail` / `NoteSuccess` / `Session.Bind`，也不
+`Acquire`：外部上游的 401 绝不能让一个 CodeBuddy 账号被冷却。回退之所以免费，是因为
+根本没有状态需要撤销。
+
+外部上游的错误响应体**永不外泄**：那里描述的是另一套基础设施，而探针要找的恰恰就是
+它是否存在。客户端只看到中性错误，或正常路径的答案。
+
+客户端面形态必须与正常路径**完全一致**（model 回显客户端模型名、id 一律重新生成为
+`chatcmpl-`+hex、剥离后端指纹字段）。否则「响应 id 的形状」本身就会告诉探针是否被改
+道了——那是比泄漏模型名更严重的信息泄漏。
+
+**`/v1/messages` 的边界**：该 Anthropic 端点只服务**被改道的探针**。普通 Messages 请求
+收到明确的 400（附提示改用 `/v1/chat/completions`），因为网关内部不说 Messages 协议。
+要做到「真正的 Messages 服务」需要在两个方向上完整翻译 Messages↔OpenAI（请求、响应、
+SSE 事件），而生产流量 100% 是 OpenAI 格式——为一个没有流量的端点把风险引入关键路径
+不划算。
+
+**每客户端上限的真实含义**：改道的隔离键依次取会话键、`Authorization` 哈希。在 NewAPI
+背后，`Authorization` 是网关自己的数据面密钥，对所有客户端**恒定**，所以实际隔离粒度
+是「会话」而不是「客户」。`/status` 的 `distinct_clients` 让这一点可观测；唯一能兜住
+这种退化的是全局上限 `max_per_hour_total`。
+
+**告警（Telegram）**：外部上游健康探针掉线、每客户端上限触发、全局上限触发、改道失败、
+改道率超过阈值。相同告警键 30 分钟内只发一次——否则一个掉线的上游会每请求发一条，运维
+会把通知关掉，也就丢掉了真正重要的那条。发送在协程中、队列有界：网络慢时宁可丢告警
+（并计入 `dropped`），也不拖慢一个客户端请求。配置经
+`WB2A_TELEGRAM_BOT_TOKEN` / `WB2A_TELEGRAM_CHAT_ID`（或 `telegram.*`）。
+
 ### 客户端面脱敏（安全审计 2026-09-28）
 
 网关的上游是 CodeBuddy，下游是 NewAPI，而 NewAPI 会把错误文案与响应字段继续透给最终客户。因此**任何到达客户端的后端身份都是泄漏**。审计确认并修复的泄漏面：

@@ -152,7 +152,7 @@ func TestUIDPrefix(t *testing.T) {
 func TestLogChatRowFormat(t *testing.T) {
 	withChatLog(t)
 	out := captureStdout(t, func() {
-		logChatRow(412*time.Millisecond, 27100*time.Millisecond, "deepseek-v4-flash", "stream", "00e26541abcdef", "示例号", http.StatusOK, 1234)
+		logChatRow(412*time.Millisecond, 27100*time.Millisecond, "deepseek-v4-flash", "stream", "00e26541abcdef", "示例号", "", http.StatusOK, 1234)
 	})
 	for _, want := range []string{
 		"| #", "deepseek-v4", "| stream |", "| 200 |", "示例号(00e26541)", "TTFB=412ms", "tok=1234", "tok/s   |", "total=",
@@ -169,7 +169,7 @@ func TestLogChatRowFormat(t *testing.T) {
 func TestLogChatRowNoUsageShowsDash(t *testing.T) {
 	withChatLog(t)
 	out := captureStdout(t, func() {
-		logChatRow(0, time.Second, "glm-5.2", "sync", "s1", "", http.StatusServiceUnavailable, -1)
+		logChatRow(0, time.Second, "glm-5.2", "sync", "s1", "", "", http.StatusServiceUnavailable, -1)
 	})
 	for _, want := range []string{"TTFB=-", "tok=-", "tok=-      |", "| 503 |"} {
 		if !strings.Contains(out, want) {
@@ -181,8 +181,8 @@ func TestLogChatRowNoUsageShowsDash(t *testing.T) {
 func TestLogChatRowSeqIncrements(t *testing.T) {
 	withChatLog(t)
 	out := captureStdout(t, func() {
-		logChatRow(0, time.Second, "m", "sync", "u", "", 200, 1)
-		logChatRow(0, time.Second, "m", "sync", "u", "", 200, 1)
+		logChatRow(0, time.Second, "m", "sync", "u", "", "", 200, 1)
+		logChatRow(0, time.Second, "m", "sync", "u", "", "", 200, 1)
 	})
 	lines := strings.Split(strings.TrimSpace(out), "\n")
 	if len(lines) != 2 {
