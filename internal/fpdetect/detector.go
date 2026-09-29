@@ -32,6 +32,10 @@ const (
 	SigSSEShape          = "sse_shape"
 	SigCodingLike        = "coding_like"
 	SigLongConversation  = "long_conversation"
+	// SigLanguageMismatch est le seul signal calculé sur la RÉPONSE (voir
+	// AnalyzeResponse) : il compare l'entrée à la sortie, et la sortie n'existe
+	// qu'après l'appel amont.
+	SigLanguageMismatch = "language_mismatch"
 )
 
 // defaultWeights : signaux forts >= seuil (4.0) par construction, signaux faibles
@@ -46,6 +50,11 @@ var defaultWeights = map[string]float64{
 	// usage normal.
 	SigRepetitionPattern: 4.0,
 	SigRepeatRequest:     4.0,
+	// Une réponse en chinois à une question qui ne l'est pas est un aveu direct du
+	// backend : signal fort, qui route seul (non conditionnel — la forme mesurée en
+	// production est sans ambiguïté, et le faux positif « traduis en chinois » est
+	// écarté en amont par asksForCJKOutput).
+	SigLanguageMismatch: 5.0,
 
 	// Sous le seuil À DESSEIN (4.0) : signaux « forts mais sujets à corroboration »
 	// (voir Config.CorroborationSignals). Le relevé de production du 2026-09-29 a
@@ -125,7 +134,7 @@ const corroborationWeakMin = 2
 var defaultStrong = []string{
 	SigGlitchToken, SigModelQuestion, SigCutoffExplicit, SigRepetitionPattern,
 	SigRepeatRequest, SigMassRepetition, SigToolSuspicious, SigToolCountExtreme,
-	SigPDFContent, SigRepeatedLines, SigToolGenericName,
+	SigPDFContent, SigRepeatedLines, SigToolGenericName, SigLanguageMismatch,
 }
 
 // Config règle le détecteur.
@@ -273,6 +282,49 @@ func (r Result) Explain() string {
 	}
 	return fmt.Sprintf("score=%.1f%s [%s]%s", r.Score, eff, strings.Join(parts, ", "), tag)
 }
+
+// AnalyzeResponse applique les signaux qui dépendent de la RÉPONSE à reqBody.
+//
+// Un seul signal vit ici aujourd'hui : language_mismatch (entrée sans CJK, réponse en
+// CJK). Il est séparé de Analyze parce que le détecteur de requête tourne AVANT tout
+// appel amont : au moment où l'on saurait, la réponse est déjà produite. L'appelant
+// décide quoi faire du verdict — sur une réponse non encore envoyée, un reroutage est
+// encore possible ; sur un flux déjà à moitié transmis, non.
+//
+// Le texte comparé est celui de l'UTILISATEUR, pas du système : un projet dont le
+// prompt système contient du chinois ne doit pas blanchir une réponse chinoise à une
+// question anglaise.
+func (d *Detector) AnalyzeResponse(reqBody []byte, output string) Result {
+	res := Result{}
+	if !d.wants(SigLanguageMismatch) {
+		return res
+	}
+	if len(reqBody) == 0 || output == "" {
+		return res
+	}
+	var raw map[string]any
+	if err := json.Unmarshal(reqBody, &raw); err != nil {
+		return res
+	}
+	input, _ := extractParts(raw)
+	if !languageMismatch(input, output) {
+		return res
+	}
+	res.Signals = append(res.Signals, Signal{
+		Name:   SigLanguageMismatch,
+		Weight: d.weight(SigLanguageMismatch),
+		Detail: fmt.Sprintf("entrée sans CJK, réponse à %d caractères CJK (%.0f%%)",
+			countCJK(output), cjkShare(output)*100),
+	})
+	res.Score = d.weight(SigLanguageMismatch)
+	res.Strong = SigLanguageMismatch
+	res.EffectiveScore = res.Score
+	res.Route = true
+	return res
+}
+
+// wants : vrai si le signal a un poids non nul dans cette configuration.
+func (d *Detector) wants(name string) bool { return d.weight(name) != 0 }
 
 // ExplainDetailed ajoute le détail de chaque signal — compteurs, pourcentages, nom du
 // FRAGMENT de notre propre liste qui a réagi. Aucun contenu de requête n'y figure : le

@@ -2,6 +2,7 @@
 package server
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -973,7 +974,22 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		if peek.Stream {
 			// 流式：透传结束后立即关闭上游 body，避免 defer 在轮转场景下堆积 fd。
 			st.status = http.StatusOK
-			stats := newChatStatsReaderSince(rc, st.start)
+			// Désaccord de langue : la décision doit être prise AVANT la première
+			// écriture (après, les trames sont déjà chez le client). On lit donc le
+			// préfixe du flux, et on le rejoue à l'identique si l'on poursuit
+			// normalement — le client ne voit aucune différence.
+			// Le coût (attendre la première trame porteuse de contenu) n'est payé que
+			// si le signal est réellement armé.
+			src := io.Reader(rc)
+			if h.languageMismatchEnabled() {
+				prefix, rest := sniffStreamPrefix(rc)
+				src = io.MultiReader(bytes.NewReader(prefix), rest)
+				if h.rerouteOnStreamMismatch(w, r, body, prefix, clientModel, st) {
+					rc.Close()
+					return
+				}
+			}
+			stats := newChatStatsReaderSince(src, st.start)
 			// gateway_hint（SSE）：成功状态 200 已开流，中途 error 帧透传时附加
 			// hint 字段（hintFn 惰性求值——正常流零开销，只有真撞到 error 帧才
 			// 组装请求上下文做判定）。
@@ -1019,6 +1035,18 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		recordAttempt(acct.UID, usageDeltaFromResponse(resp), attemptStarted)
+		// Désaccord de langue (question sans CJK, réponse en CJK) : rien n'a encore été
+		// écrit au client à ce stade (le corps est agrégé puis écrit à la fin), donc on
+		// peut écarter cette réponse et rejouer la requête sur l'upstream externe.
+		// Le compte CodeBuddy a déjà été débité ci-dessus : ces jetons ont réellement
+		// été consommés, les masquer fausserait le relevé de coûts.
+		if h.languageMismatchEnabled() {
+			if res := h.cfg.FPDetect.AnalyzeResponse(body, completionText(resp)); res.Route {
+				if h.rerouteOnMismatch(w, r, body, res, clientModel, false, st) {
+					return
+				}
+			}
+		}
 		// 内部成本账本**先**取值：usage.credit 属于非标准字段，下一步剥离后就读不到了
 		// ——顺序颠倒会让 costTier 失去数据来源（审计发现的既有隐患）。
 		costCredit, costTokens, hasCost := usageCreditTotal(resp)
@@ -1141,6 +1169,16 @@ type FPCounters struct {
 	// Expose la limite structurelle du plafond : si cette valeur reste à 1 alors que le
 	// trafic est varié, le plafond « par client » est en réalité global.
 	reroutedKeys map[string]struct{}
+	// --- désaccord de langue (language_mismatch) --------------------------------
+	// MismatchDetected : réponses incohérentes repérées (question sans CJK, réponse en
+	// CJK). C'est la mesure de la fuite : chaque unité est une réponse qui a trahi le
+	// backend auprès du client.
+	MismatchDetected int64
+	// MismatchRerouted / MismatchKept : ce qu'on en a fait. La différence est le
+	// résidu de fuite réellement subi par les clients.
+	MismatchRerouted int64
+	MismatchKept     int64
+
 	// IdentitySources : nombre de quotas consommés par ORIGINE de la clé (client /
 	// conv / auth / key). C'est le seul moyen de constater depuis /status que l'en-tête
 	// d'identité client arrive vraiment — sans ce compteur, une isolation par client
@@ -1250,6 +1288,36 @@ func identitySource(key string) string {
 		return "aucune"
 	}
 	return key[:i]
+}
+
+// NoteMismatch / NoteMismatchRerouted / NoteMismatchKept : désaccord de langue.
+//
+// Le signal alimente la même ventilation `by_signal` que les signaux de requête — un
+// signal reste un signal, quelle que soit la phase qui l'a calculé. En revanche
+// `analyzed` n'est PAS incrémenté : la réponse appartient à une requête déjà comptée,
+// la compter une seconde fois fausserait le taux de sondes.
+func (c *FPCounters) NoteMismatch(r fpdetect.Result) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.BySignal == nil {
+		c.BySignal = map[string]int64{}
+	}
+	for _, s := range r.Signals {
+		c.BySignal[s.Name]++
+	}
+	c.MismatchDetected++
+}
+
+func (c *FPCounters) NoteMismatchRerouted() {
+	c.mu.Lock()
+	c.MismatchRerouted++
+	c.mu.Unlock()
+}
+
+func (c *FPCounters) NoteMismatchKept() {
+	c.mu.Lock()
+	c.MismatchKept++
+	c.mu.Unlock()
 }
 
 // NoteRerouteOK / NoteRerouteFailure / NoteHealthBlocked : compteurs d'exécution.
@@ -1372,6 +1440,11 @@ func (c *FPCounters) Snapshot() map[string]any {
 		"health_blocked":          c.HealthBlocked,
 		"distinct_clients":        len(c.reroutedKeys),
 		"identity_sources":        src,
+		"language_mismatch": map[string]int64{
+			"detected": c.MismatchDetected,
+			"rerouted": c.MismatchRerouted,
+			"kept":     c.MismatchKept,
+		},
 	}
 }
 
