@@ -497,6 +497,25 @@ model=deepseek-v4.1-flash score=8.5
 `dry_run=true` 让这次观察没有产生任何账单。修复方式是**要求佐证**（见上）：两个信号
 被降为 +2.0 并列入 `corroboration_signals`，未获佐证即被剔除。
 
+**修复后的生产 A/B 验证（2026-09-29，四条真实请求）**：
+
+```
+# 假阳性复现：PDF + 27 个工具 + coding_like + recent_fact + sse_shape
+[fp] signal conditionnel IGNORÉ (non corroboré, aucun reroutage) score=3.5 effectif=-0.5
+     [recent_fact(+2.0), ~tool_count_extreme(+2.0), ~pdf_content(+2.0), sse_shape(+1.5), coding_like(-4.0)]
+
+# 真探针一：glitch token + PDF
+[fp] SONDE DÉTECTÉE score=7.0 [glitch_token(+5.0), pdf_content(+2.0)] fort=glitch_token
+
+# 真探针二：仅身份提问
+[fp] SONDE DÉTECTÉE score=5.0 [model_question(+5.0)] fort=model_question
+
+# 正常开发：27 个工具 + coding_like，无任何条件信号
+[fp] signal conditionnel IGNORÉ score=-2.0 effectif=-4.0 [~tool_count_extreme(+2.0), coding_like(-4.0)]
+```
+
+`would_route=2`（只有两个真探针），`ignored_signals={pdf_content:1, tool_count_extreme:2}`。
+
 ### 客户端面脱敏（安全审计 2026-09-28）
 
 网关的上游是 CodeBuddy，下游是 NewAPI，而 NewAPI 会把错误文案与响应字段继续透给最终客户。因此**任何到达客户端的后端身份都是泄漏**。审计确认并修复的泄漏面：
