@@ -297,3 +297,41 @@ func TestCompletionText(t *testing.T) {
 		t.Fatalf("réponse vide = %q", got)
 	}
 }
+
+// TestMismatchDemandeLaLangueDeLUtilisateur : le prompt système de la passerelle est en
+// chinois, donc le modèle de remplacement répond en chinois à son tour si on ne lui dit
+// rien. La requête rejouée doit porter une consigne de langue — et SEULEMENT celle-là :
+// le trafic normal ne doit pas la recevoir.
+func TestMismatchDemandeLaLangueDeLUtilisateur(t *testing.T) {
+	ext := newFakeExternal(t, nil)
+	h, _ := mismatchHandler(t, ext, sseWithContent(zhAnswer))
+
+	postJSONClient(h, "/v1/chat/completions", clientBody(t, enQuestion, false), "u42")
+	sent := ext.last.Load().(string)
+	if !strings.Contains(sent, "same language as the user's last message") {
+		t.Fatalf("la requête rejouée doit porter la consigne de langue : %s", sent[:400])
+	}
+	// Le corps d'origine du client n'est pas modifié (le test vérifie indirectement que
+	// la consigne a été ajoutée par lesystem prompt, pas en écrasant la question).
+	if !strings.Contains(sent, enQuestion) {
+		t.Fatalf("la question du client doit être conservée : %s", sent[:400])
+	}
+}
+
+// TestReroutageSondeNormaleSansConsigneDeLangue : le reroutage d'une sonde détectée sur
+// la REQUÊTE (chemin normal) ne doit pas recevoir la consigne — elle est réservée au
+// désaccord de langue.
+func TestReroutageSondeNormaleSansConsigneDeLangue(t *testing.T) {
+	ext := newFakeExternal(t, nil)
+	rr, _ := newRerouter(t, ext, false, 20, 100, false)
+	h, _ := probeHTTP(t, rr)
+
+	postJSONClient(h, "/v1/chat/completions", mustJSON(t, map[string]any{
+		"model":    "claude-opus-5",
+		"messages": []any{map[string]any{"role": "user", "content": "What model are you?"}},
+	}), "u42")
+	sent := ext.last.Load().(string)
+	if strings.Contains(sent, "same language as the user's last message") {
+		t.Fatalf("la consigne ne doit pas s'appliquer au reroutage des sondes de requête : %s", sent[:300])
+	}
+}

@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/linguo2625469/workbuddy2api-panel/internal/fpdetect"
+	"github.com/linguo2625469/workbuddy2api-panel/internal/prompt"
 )
 
 // Signal « language_mismatch » : la réponse trahit le backend.
@@ -126,7 +127,12 @@ func (h *Handler) rerouteOnMismatch(w http.ResponseWriter, r *http.Request, body
 		return false
 	}
 	st.route = "crazy"
-	if rr.Try(r.Context(), w, r, body, clientModel, stream, st, key) {
+	// Le prompt système de la passerelle est en chinois : sans cette consigne, le
+	// modèle de remplacement répond en chinois à son tour et le client ne voit aucune
+	// différence — on aurait déplacé le symptôme au lieu de le corriger. La directive
+	// n'est ajoutée QUE sur ce chemin.
+	outbound := prompt.Append(body, prompt.LanguageDirective)
+	if rr.Try(r.Context(), w, r, outbound, clientModel, stream, st, key) {
 		if h.cfg.FPStats != nil {
 			h.cfg.FPStats.NoteMismatchRerouted()
 		}

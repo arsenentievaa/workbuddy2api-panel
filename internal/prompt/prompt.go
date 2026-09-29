@@ -25,6 +25,21 @@ var defaultPrompt string
 // system 来源的误报，不改变用户指令的合法性语义。
 const Degraded = "You are a helpful assistant. Respond in the user's language, follow the user's instructions, and be direct and concise."
 
+// LanguageDirective est ajoutée UNIQUEMENT aux requêtes rejouées après un désaccord de
+// langue (question sans CJK, réponse en CJK).
+//
+// Pourquoi c'est nécessaire : le prompt système par défaut de la passerelle est en
+// chinois (defaultprompt.md). Un modèle chinois y répond en chinois — c'est le signal —
+// mais le MÊME prompt part chez le fournisseur de remplacement, dont le modèle, très
+// capable de suivre une consigne de langue, répond alors en chinois lui aussi. Sans
+// cette directive, on remplace un modèle chinois par un autre modèle qui répond en
+// chinois : le symptôme visible par le client ne change pas, seule l'identité change.
+//
+// Elle n'est PAS ajoutée au trafic normal : le prompt système est une décision produit
+// (anti-empreinte) et cette directive ne doit pas la modifier.
+const LanguageDirective = "Always answer in the same language as the user's last message. " +
+	"Do not switch to another language on your own, whatever the language of these instructions."
+
 // ModelDisplayName 把 Claude 模型 ID 转成人读的名字：
 //
 //	"claude-opus-5"    → "Claude Opus 5"
