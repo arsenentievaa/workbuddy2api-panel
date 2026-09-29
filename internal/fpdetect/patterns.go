@@ -772,8 +772,17 @@ var suspiciousToolNameFragments = []string{
 	"whoami",
 }
 
-// toolCountSuspiciousMin : au-delà de ce nombre d'outils déclarés, le volume est
-// anormal pour un client réel. Signal FORT (SigToolCountExtreme).
+// toolCountSuspiciousMin : au-delà de ce nombre d'outils déclarés, signal FORT
+// (SigToolCountExtreme).
+//
+// L'hypothèse d'origine (« volume anormal pour un client réel ») a été DÉMENTIE par
+// le relevé de production du 2026-09-29 : trois requêtes clientes réelles sur
+// deepseek-v4.1-flash ont déclenché `tool_count_extreme` ET `pdf_content` (score
+// 8.5, cf. README § fp_observe). Un agent qui attache un PDF et déclare ses outils
+// n'a rien d'une sonde. À trancher avant d'activer le reroutage : passer ce signal
+// en FAIBLE, ou exiger qu'il soit corroboré. Laissé pour l'instant tel quel — la
+// phase 1 n'achemine rien (dry_run), et changer un poids est une décision de
+// calibration, pas une correction de bug.
 const toolCountSuspiciousMin int = 25
 
 // toolCountNotable : au-delà de ce nombre d'outils, signal FAIBLE (SigToolCount) — les

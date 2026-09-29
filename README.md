@@ -453,6 +453,23 @@ glitch token、身份提问、PDF、异常工具、重复请求…）。设计�
 50 000 tokens（agent 形态），「工具多于 5 个」或「启用 thinking」若单独判定，会把
 绝大多数正常客户流量送去昂贵的真模型。
 
+**上线首日实测（2026-09-29，启用后 3 分钟内）**，共分析 29 条请求，其中 28 条判定为
+「本应重定向」。除我主动投递的探针外，出现了一个必须解决的假阳性：
+
+```
+model=deepseek-v4.1-flash score=8.5
+  [recent_fact(+2.0), tool_count_extreme(+4.0), pdf_content(+4.0),
+   sse_shape(+1.5), coding_like(-3.0)]  fort=tool_count_extreme
+```
+
+三条**真实客户**请求（同一形态，含 `coding_like` 惩罚说明是正常编码流量）同时命中
+`tool_count_extreme` 与 `pdf_content`。也就是说：**agent 客户端附一个 PDF、声明
+25 个以上工具，在今天的权重下就会被送去付费的真模型**——`pdf_content` 与
+`tool_count_extreme` 作为「单独即可判定」的强信号在本租户的真实流量里站不住。
+`dry_run=true` 让这次观察没有产生任何账单。启用重定向前必须二选一：把这两个信号降为
+弱信号，或要求它们必须与其他探针特征共同出现（`internal/fpdetect/patterns.go` 的
+`toolCountSuspiciousMin` 注释里记了同样的结论）。
+
 ### 客户端面脱敏（安全审计 2026-09-28）
 
 网关的上游是 CodeBuddy，下游是 NewAPI，而 NewAPI 会把错误文案与响应字段继续透给最终客户。因此**任何到达客户端的后端身份都是泄漏**。审计确认并修复的泄漏面：
