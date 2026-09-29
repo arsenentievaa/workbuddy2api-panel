@@ -377,3 +377,17 @@ func TestExternalTargetEndpoint(t *testing.T) {
 		}
 	}
 }
+
+// TestExternalHealthMesure : « jamais mesuré » ne doit pas se confondre avec « malsain ».
+func TestExternalHealthMesure(t *testing.T) {
+	h := NewExternalHealth(time.Hour)
+	if s := h.Snapshot(); s.Measured || s.Healthy {
+		t.Fatalf("avant toute mesure : measured=false attendu (healthy reste false), obtenu %+v", s)
+	}
+	if _, _, err := h.Healthy(context.Background(), func(context.Context) error { return nil }); err != nil {
+		t.Fatal(err)
+	}
+	if s := h.Snapshot(); !s.Measured || !s.Healthy {
+		t.Fatalf("après une sonde réussie : measured=true et healthy=true attendus, obtenu %+v", s)
+	}
+}

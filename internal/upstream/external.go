@@ -278,7 +278,13 @@ func (h *ExternalHealth) errLocked() error {
 
 // Snapshot : état de santé pour /status et pour les alertes.
 type HealthSnapshot struct {
-	Healthy     bool   `json:"healthy"`
+	Healthy bool `json:"healthy"`
+	// Measured distingue « jamais mesuré » de « mesuré et malsain ». Sans lui, un
+	// /status lu juste après un redémarrage annonce healthy=false alors que rien n'a
+	// encore été testé — de quoi déclencher une fausse alerte de panne à chaque
+	// déploiement. Healthy reste false tant qu'aucune mesure n'existe : on ne déclare
+	// pas sain ce qu'on n'a pas vérifié.
+	Measured    bool   `json:"measured"`
 	LastError   string `json:"last_error"`
 	CheckedAt   string `json:"checked_at"`
 	TTLSeconds  int    `json:"ttl_seconds"`
@@ -293,6 +299,7 @@ func (h *ExternalHealth) Snapshot() HealthSnapshot {
 	defer h.mu.Unlock()
 	return HealthSnapshot{
 		Healthy:     h.healthy,
+		Measured:    h.checks > 0,
 		LastError:   h.lastErr,
 		CheckedAt:   h.checkedAt.UTC().Format(time.RFC3339),
 		TTLSeconds:  int(h.ttl.Seconds()),

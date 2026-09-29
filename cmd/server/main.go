@@ -418,6 +418,11 @@ func main() {
 				case <-ctx.Done():
 					return
 				case <-t.C:
+					// La santé est vérifiée MÊME SANS trafic : l'exigence « alerter si
+					// le fournisseur tombe » ne peut pas dépendre de l'arrivée d'une
+					// sonde. Le cache (5 min) rend ce battement quasi gratuit, et
+					// l'alerte part dès la bascule détectée.
+					rerouter.Probe(ctx)
 					rerouter.EvaluateRate()
 				}
 			}
