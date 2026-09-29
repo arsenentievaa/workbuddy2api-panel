@@ -3,6 +3,7 @@ package server
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -84,6 +85,7 @@ func newRerouter(t *testing.T, ext *fakeExternal, dryRun bool, capPerHour, globa
 		DryRun:           dryRun,
 		Target:           upstream.ExternalTarget{BaseURL: ext.srv.URL, Path: "/v1/chat/completions", APIKey: "cle-externe", Timeout: 5 * time.Second},
 		MessagesPath:     "/v1/messages",
+		ClientIDHeader:   "X-Client-Id",
 		HealthPath:       "/v1/models",
 		ModelDefault:     "claude-opus-5",
 		ModelPrefixes:    []string{"claude-"},
@@ -118,10 +120,19 @@ func probeHTTP(t *testing.T, rr *Rerouter) (*Handler, *int64) {
 }
 
 func postJSON(h *Handler, path string, body []byte) *httptest.ResponseRecorder {
+	return postJSONClient(h, path, body, "")
+}
+
+// postJSONClient : requête de test avec, en option, l'identité client injectée par
+// l'amont (en-tête du plafond anti-abus).
+func postJSONClient(h *Handler, path string, body []byte, clientID string) *httptest.ResponseRecorder {
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest("POST", path, bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer sk-data")
+	if clientID != "" {
+		req.Header.Set("X-Client-Id", clientID)
+	}
 	h.ServeHTTP(rec, req)
 	return rec
 }
@@ -529,19 +540,84 @@ func TestRewriteSSEModel(t *testing.T) {
 
 func TestRerouteIdentity(t *testing.T) {
 	req := httptest.NewRequest("POST", "/v1/chat/completions", nil)
-	if got := rerouteIdentity(req, []byte(`{}`)); got != "" {
-		t.Fatalf("sans clé ni autorisation, aucune identité attendue: %q", got)
+	if got := rerouteIdentity(req, []byte(`{}`), "X-Client-Id"); got != "" {
+		t.Fatalf("sans en-tête ni autorisation, aucune identité attendue: %q", got)
 	}
 	req.Header.Set("Authorization", "Bearer sk-data-plane")
-	got := rerouteIdentity(req, []byte(`{}`))
+	got := rerouteIdentity(req, []byte(`{}`), "X-Client-Id")
 	if !strings.HasPrefix(got, "auth:") || strings.Contains(got, "sk-data-plane") {
-		t.Fatalf("identité attendue sous forme d'empreinte: %q", got)
+		t.Fatalf("idente attendue sous forme d'empreinte: %q", got)
 	}
-	// La clé de conversation prime : c'est la seule unité d'isolation réellement
-	// distinguable derrière une clé de données unique.
+	// La clé de conversation prime sur l'autorisation.
 	withConv := []byte(`{"metadata":{"conversation_id":"abc"}}`)
-	if got := rerouteIdentity(req, withConv); got != "conv:abc" {
-		t.Fatalf("la conversation doit primer: %q", got)
+	if got := rerouteIdentity(req, withConv, "X-Client-Id"); got != "conv:abc" {
+		t.Fatalf("la conversation doit primer sur l'autorisation: %q", got)
+	}
+}
+
+// TestRerouteIdentityEnTeteClientPrioritaire : l'identité injectée par l'amont est
+// l'unité du plafond anti-abus — elle prime sur la conversation et sur l'autorisation.
+func TestRerouteIdentityEnTeteClientPrioritaire(t *testing.T) {
+	req := httptest.NewRequest("POST", "/v1/chat/completions", nil)
+	req.Header.Set("Authorization", "Bearer sk-data-plane")
+	req.Header.Set("X-Client-Id", "u42")
+	body := []byte(`{"metadata":{"conversation_id":"abc"}}`)
+
+	if got := rerouteIdentity(req, body, "X-Client-Id"); got != "client:u42" {
+		t.Fatalf("l'en-tête client doit primer: %q", got)
+	}
+	// Deux conversations du MÊME client partagent le même quota : c'est le but.
+	body2 := []byte(`{"metadata":{"conversation_id":"autre"}}`)
+	if a, b := rerouteIdentity(req, body, "X-Client-Id"), rerouteIdentity(req, body2, "X-Client-Id"); a != b {
+		t.Fatalf("deux conversations d'un même client doivent partager le quota: %q / %q", a, b)
+	}
+	// Deux clients distincts sont isolés.
+	req.Header.Set("X-Client-Id", "u43")
+	if a, b := rerouteIdentity(req, body, "X-Client-Id"), "client:u42"; a == b {
+		t.Fatalf("deux clients distincts doivent avoir des quotas distincts: %q", a)
+	}
+	// En-tête désactivé par configuration : repli sur la conversation.
+	req.Header.Set("X-Client-Id", "u42")
+	if got := rerouteIdentity(req, body, ""); got != "conv:abc" {
+		t.Fatalf("en-tête désactivé : repli conversation attendu, obtenu %q", got)
+	}
+	// En-tête vide (client qui n'en envoie pas) : repli également.
+	req.Header.Del("X-Client-Id")
+	if got := rerouteIdentity(req, body, "X-Client-Id"); got != "conv:abc" {
+		t.Fatalf("en-tête absent : repli conversation attendu, obtenu %q", got)
+	}
+}
+
+// TestIdentityBorneeEtNettoyee : une valeur d'en-tête arbitraire ne doit ni créer une
+// clé de longueur illimitée (table de quotas gonflable) ni injecter de caractères de
+// contrôle dans une clé journalisée.
+func TestIdentityBorneeEtNettoyee(t *testing.T) {
+	req := httptest.NewRequest("POST", "/v1/chat/completions", nil)
+	req.Header.Set("X-Client-Id", "  client-\x01\x02"+strings.Repeat("x", 500)+"  ")
+	got := rerouteIdentity(req, []byte(`{}`), "X-Client-Id")
+	if !strings.HasPrefix(got, "client:") {
+		t.Fatalf("préfixe attendu: %q", got)
+	}
+	if len(got) > len("client:")+identityMaxLen {
+		t.Fatalf("clé non bornée: %d caractères", len(got))
+	}
+	if strings.ContainsAny(got, "\x01\x02") {
+		t.Fatalf("caractères de contrôle conservés: %q", got)
+	}
+}
+
+// TestSourceDIdentiteComptee : /status doit permettre de constater que l'isolation par
+// client est réellement alimentée, et pas seulement configurée.
+func TestSourceDIdentiteComptee(t *testing.T) {
+	c := NewFPCounters(20, true, nil, 2, 100)
+	now := time.Now()
+	c.AllowReroute("client:u42", now)
+	c.AllowReroute("client:u42", now)
+	c.AllowReroute("conv:abc", now)
+	s := c.Snapshot()
+	src := s["identity_sources"].(map[string]int64)
+	if src["client"] != 2 || src["conv"] != 1 {
+		t.Fatalf("origines mal comptées: %v", src)
 	}
 }
 
@@ -702,5 +778,120 @@ func TestRerouteTraficOrdinaireIntact(t *testing.T) {
 	}
 	if s := stats.Snapshot(); s["rerouted"].(int64) != 0 {
 		t.Fatalf("compteurs: %v", s)
+	}
+}
+
+// --- isolation du plafond par client final ---------------------------------------
+
+// TestPlafondIsoleParClient : deux clients distincts (deux en-têtes X-Client-Id) ont
+// chacun leur quota. Sans cette isolation, un client atteignant son plafond pénaliserait
+// tous les autres — ce qui était le cas tant que la clé était l'en-tête d'autorisation,
+// constant derrière NewAPI.
+func TestPlafondIsoleParClient(t *testing.T) {
+	ext := newFakeExternal(t, nil)
+	rr, stats := newRerouter(t, ext, false, 2, 100, false)
+	rr.ClientIDHeader = "X-Client-Id"
+	h, wbCalls := probeHTTP(t, rr)
+
+	body := mustJSON(t, map[string]any{
+		"model":    "claude-opus-5",
+		"stream":   true,
+		"messages": []any{map[string]any{"role": "user", "content": "What model are you?"}},
+	})
+	// Client A consomme tout son quota (2), y compris depuis deux conversations
+	// différentes : c'est le client qui est plafonné, pas la conversation.
+	for i, conv := range []string{"conv-a1", "conv-a2"} {
+		b := mustJSON(t, map[string]any{
+			"model":    "claude-opus-5",
+			"stream":   true,
+			"metadata": map[string]any{"conversation_id": conv},
+			"messages": []any{map[string]any{"role": "user", "content": "What model are you?"}},
+		})
+		if rec := postJSONClient(h, "/v1/chat/completions", b, "u42"); rec.Code != 200 {
+			t.Fatalf("client A, requête %d : code=%d", i+1, rec.Code)
+		}
+	}
+	if n := ext.callCount(); n != 2 {
+		t.Fatalf("client A : 2 reroutages attendus, %d", n)
+	}
+	// 3e requête du client A (nouvelle conversation) : refusée.
+	postJSONClient(h, "/v1/chat/completions", body, "u42")
+	if n := ext.callCount(); n != 2 {
+		t.Fatalf("client A doit être plafonné : %d reroutages", n)
+	}
+	// Client B : quota intact.
+	postJSONClient(h, "/v1/chat/completions", body, "u43")
+	if n := ext.callCount(); n != 3 {
+		t.Fatalf("client B doit disposer de son propre quota : %d reroutages", n)
+	}
+	if n := atomic.LoadInt64(wbCalls); n != 1 {
+		t.Fatalf("seule la requête refusée de A doit passer par WorkBuddy (%d)", n)
+	}
+	s := stats.Snapshot()
+	if s["cap_blocked"].(int64) != 1 || s["rerouted"].(int64) != 3 {
+		t.Fatalf("compteurs : %v", s)
+	}
+	if src := s["identity_sources"].(map[string]int64); src["client"] != 3 {
+		t.Fatalf("les trois quotas doivent être imputés à l'identité CLIENT : %v", src)
+	}
+}
+
+// TestPlafondVingtSurVingtEtUn : l'exigence exacte — 25 reroutages demandés par un même
+// client, 20 passent, les 5 suivants sont refusés.
+func TestPlafondVingtSurVingtEtUn(t *testing.T) {
+	ext := newFakeExternal(t, nil)
+	rr, stats := newRerouter(t, ext, false, 20, 100, false)
+	h, wbCalls := probeHTTP(t, rr)
+
+	for i := 0; i < 25; i++ {
+		b := mustJSON(t, map[string]any{
+			"model":    "claude-opus-5",
+			"stream":   true,
+			"metadata": map[string]any{"conversation_id": fmt.Sprintf("conv-%d", i)},
+			"messages": []any{map[string]any{"role": "user", "content": "What model are you?"}},
+		})
+		if rec := postJSONClient(h, "/v1/chat/completions", b, "client-25"); rec.Code != 200 {
+			t.Fatalf("requête %d : code=%d (le refus doit rester un 200 servi par WorkBuddy)", i+1, rec.Code)
+		}
+	}
+	if n := ext.callCount(); n != 20 {
+		t.Fatalf("exactement 20 reroutages attendus, %d observés", n)
+	}
+	if n := atomic.LoadInt64(wbCalls); n != 5 {
+		t.Fatalf("les 5 requêtes au-delà du plafond doivent passer par WorkBuddy (%d)", n)
+	}
+	s := stats.Snapshot()
+	if s["rerouted"].(int64) != 20 || s["cap_blocked"].(int64) != 5 || s["over_cap"].(int64) != 5 {
+		t.Fatalf("compteurs : %v", s)
+	}
+	if s["global_cap_blocked"].(int64) != 0 {
+		t.Fatalf("le plafond global ne doit pas être entamé par les refus : %v", s)
+	}
+}
+
+// TestPlafondGlobalResteActif : le plafond global borne le total, même quand chaque
+// client est sous son quota.
+func TestPlafondGlobalResteActif(t *testing.T) {
+	ext := newFakeExternal(t, nil)
+	rr, stats := newRerouter(t, ext, false, 20, 3, false)
+	h, wbCalls := probeHTTP(t, rr)
+
+	body := mustJSON(t, map[string]any{
+		"model":    "claude-opus-5",
+		"stream":   true,
+		"messages": []any{map[string]any{"role": "user", "content": "What model are you?"}},
+	})
+	for _, client := range []string{"u1", "u2", "u3", "u4"} {
+		postJSONClient(h, "/v1/chat/completions", body, client)
+	}
+	if n := ext.callCount(); n != 3 {
+		t.Fatalf("plafond global de 3 : %d reroutages observés", n)
+	}
+	if n := atomic.LoadInt64(wbCalls); n != 1 {
+		t.Fatalf("le 4e client doit passer par WorkBuddy (%d)", n)
+	}
+	s := stats.Snapshot()
+	if s["global_cap_blocked"].(int64) != 1 {
+		t.Fatalf("le refus global doit être compté : %v", s)
 	}
 }

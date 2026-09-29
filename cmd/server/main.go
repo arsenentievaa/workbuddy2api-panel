@@ -354,6 +354,7 @@ func main() {
 					Timeout: time.Duration(cfg.FPRoute.TimeoutSeconds) * time.Second,
 				},
 				MessagesPath:     cfg.FPRoute.MessagesPath,
+				ClientIDHeader:   cfg.FPRoute.ClientIDHeader,
 				HealthPath:       cfg.FPRoute.HealthPath,
 				ModelDefault:     cfg.FPRoute.Model,
 				ModelPrefixes:    cfg.FPRoute.ModelPrefixes,
@@ -369,10 +370,14 @@ func main() {
 			if cfg.FPObserve.DryRun {
 				state = "dry_run (aucun envoi réel)"
 			}
-			log.Printf("fp_route: activé [%s] base=%s chemin=%s modèle=%s santé=%s/%ds plafond=%d/h/client et %d/h total alertes_telegram=%v",
+			isolation := cfg.FPRoute.ClientIDHeader
+			if isolation == "" {
+				isolation = "(en-tête client désactivé : repli conversation)"
+			}
+			log.Printf("fp_route: activé [%s] base=%s chemin=%s modèle=%s santé=%s/%ds plafond=%d/h/client et %d/h total isolation=%s alertes_telegram=%v",
 				state, cfg.FPRoute.BaseURL, cfg.FPRoute.Path, cfg.FPRoute.Model,
 				cfg.FPRoute.HealthPath, cfg.FPRoute.HealthTTLSeconds,
-				cfg.FPRoute.MaxPerHourPerToken, cfg.FPRoute.MaxPerHourTotal, notifier.Enabled())
+				cfg.FPRoute.MaxPerHourPerToken, cfg.FPRoute.MaxPerHourTotal, isolation, notifier.Enabled())
 		}
 	} else if fpDet != nil {
 		log.Printf("fp_route: désactivé (observation seule)")

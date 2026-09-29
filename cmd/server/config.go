@@ -237,6 +237,11 @@ type Config struct {
 		// MaxPerHourTotal : plafond global, seul garde-fou qui résiste à la
 		// dégénérescence de l'isolation par client.
 		MaxPerHourTotal int `json:"max_per_hour_total"` // défaut 100
+		// ClientIDHeader : nom de l'en-tête qui porte l'identité du client final,
+		// injecté par la passerelle amont (NewAPI : header_override
+		// {"x-client-id": "{client_id}"}). Vide = pas d'isolation par client, repli sur
+		// la conversation puis sur l'empreinte de l'autorisation.
+		ClientIDHeader string `json:"client_id_header"` // défaut "X-Client-Id"
 		// RateAlertPercent / RateAlertMinSample : surveillance du taux de reroutage.
 		RateAlertPercent   float64 `json:"rate_alert_percent"`    // défaut 5
 		RateAlertMinSample int64   `json:"rate_alert_min_sample"` // défaut 50
@@ -352,6 +357,7 @@ func Default() *Config {
 	c.FPRoute.TimeoutSeconds = 60
 	c.FPRoute.MaxPerHourPerToken = 20
 	c.FPRoute.MaxPerHourTotal = 100
+	c.FPRoute.ClientIDHeader = "X-Client-Id"
 	c.FPRoute.RateAlertPercent = 5
 	c.FPRoute.RateAlertMinSample = 50
 	c.SessionSticky.Enabled = true
@@ -655,6 +661,10 @@ func (c *Config) normalize() error {
 	if c.FPRoute.MaxPerHourTotal <= 0 {
 		c.FPRoute.MaxPerHourTotal = 100
 	}
+	// Le nom de l'en-tête n'est normalisé qu'en espaces : un en-tête explicitement vide
+	// est une configuration légitime (désactiver l'isolation par client), on ne la
+	// remplace donc pas par la valeur par défaut.
+	c.FPRoute.ClientIDHeader = strings.TrimSpace(c.FPRoute.ClientIDHeader)
 	if c.FPRoute.RateAlertPercent <= 0 {
 		c.FPRoute.RateAlertPercent = 5
 	}

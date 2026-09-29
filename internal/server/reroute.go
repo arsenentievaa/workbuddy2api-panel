@@ -55,6 +55,10 @@ type Rerouter struct {
 	Target upstream.ExternalTarget
 	// MessagesPath : endpoint Messages (Anthropic) du même fournisseur.
 	MessagesPath string
+	// ClientIDHeader : en-tête portant l'identité du client final, injecté par
+	// l'amont (NewAPI : `header_override` = x-client-id -> {client_id}). Vide =
+	// repli sur la conversation puis sur l'autorisation.
+	ClientIDHeader string
 	// HealthPath : endpoint interrogé par la sonde de santé.
 	HealthPath string
 	// ModelDefault : modèle demandé au fournisseur externe quand la requête n'en
@@ -78,15 +82,34 @@ type Rerouter struct {
 	Alerts   *alert.Notifier
 }
 
-// rerouteIdentity : clé d'isolation du plafond.
+// rerouteIdentity : clé d'isolation du plafond anti-abus.
 //
-// Elle essaie, dans l'ordre : la clé de conversation du corps, puis l'en-tête
-// d'autorisation. Derrière NewAPI, l'autorisation est la clé de données de la
-// passerelle — CONSTANTE pour tous les clients — donc l'isolation réelle est
-// par conversation, pas par client final ; le plafond global reste le seul garde-fou
-// financier. C'est une limite de ce que la passerelle peut observer, pas un choix :
-// l'exposer dans /status (distinct_clients) permet de la constater.
-func rerouteIdentity(r *http.Request, body []byte) string {
+// Ordre de préférence :
+//
+//  1. `X-Client-Id` (nom configurable) : l'identité du client final, injectée par la
+//     passerelle amont (NewAPI) depuis SON contexte de relais. C'est la seule unité
+//     qui corresponde à « un client » : elle permet de plafonner un client sans
+//     pénaliser les autres.
+//  2. La clé de conversation du corps : repli quand l'en-tête est absent (appel direct,
+//     ancien amont), avec une granularité par conversation.
+//  3. L'empreinte de l'en-tête d'autorisation : dernier recours. Derrière NewAPI cette
+//     valeur est CONSTANTE pour tous les clients, donc ce repli équivaut à un seau
+//     partagé — c'est précisément ce que l'en-tête (1) vient corriger.
+//
+// PORTÉE DE CONFIANCE : la passerelle ne peut pas vérifier elle-même la valeur de
+// l'en-tête ; elle fait confiance à l'amont qui l'injecte. Deux conséquences assumées :
+//   - NewAPI doit résoudre `X-Client-Id` CÔTÉ SERVEUR (`{client_id}`), jamais recopier
+//     un en-tête fourni par le client : sinon un client obtiendrait un quota neuf en
+//     changeant la valeur à chaque requête, et le plafond ne vaudrait rien ;
+//   - un appel direct à la passerelle (hors amont) peut forger cet en-tête. Le risque
+//     est borné par le fait que la clé de données de la passerelle est un secret
+//     partagé avec l'amont, et par le plafond global, qui reste l'ultime garde-fou.
+func rerouteIdentity(r *http.Request, body []byte, headerName string) string {
+	if headerName != "" {
+		if v := strings.TrimSpace(r.Header.Get(headerName)); v != "" {
+			return "client:" + truncateIdentity(v)
+		}
+	}
 	if k := session.ExtractKey(body); k != "" {
 		return "conv:" + k
 	}
@@ -97,6 +120,25 @@ func rerouteIdentity(r *http.Request, body []byte) string {
 		return "key:" + shortHash(k)
 	}
 	return ""
+}
+
+// truncateIdentity borne la longueur d'une valeur d'en-tête reprise comme clé de
+// compteur. Une valeur non bornée laisserait un client gonfler la table des quotas
+// (chaque valeur distincte crée une entrée) — un déni de service par la mémoire.
+const identityMaxLen = 128
+
+func truncateIdentity(v string) string {
+	v = strings.Map(func(r rune) rune {
+		// Les caractères de contrôle n'ont rien à faire dans une clé journalisée.
+		if r < 0x20 || r == 0x7f {
+			return -1
+		}
+		return r
+	}, v)
+	if len(v) > identityMaxLen {
+		v = v[:identityMaxLen]
+	}
+	return v
 }
 
 // shortHash : identifiant journalisable, jamais le secret en clair.
@@ -419,7 +461,7 @@ func (h *Handler) anthropicMessages(w http.ResponseWriter, r *http.Request) {
 	defer st.done()
 
 	var res fpdetect.Result
-	key := rerouteIdentity(r, body)
+	key := rerouteIdentity(r, body, rr.ClientIDHeader)
 	if h.cfg.FPDetect != nil {
 		res = h.cfg.FPDetect.Analyze(body, fpClientKey(body))
 		if h.cfg.FPStats != nil {
@@ -640,6 +682,15 @@ func SanitizeCompletion(resp map[string]any, clientModel string) {
 	}
 }
 
+// IsolationMode décrit, pour /status, sur quoi porte le plafond par client. Le mode
+// « conversation » est un repli, pas un équivalent : il faut pouvoir le constater.
+func (rr *Rerouter) IsolationMode() string {
+	if rr.ClientIDHeader == "" {
+		return "conversation (en-tête client désactivé)"
+	}
+	return "client via " + rr.ClientIDHeader + " (repli: conversation)"
+}
+
 // tryReroute tente de servir une sonde depuis l'upstream externe. Retourne true si la
 // réponse a été écrite (l'appelant doit alors return), false pour poursuivre sur la
 // route normale.
@@ -660,7 +711,7 @@ func (h *Handler) tryReroute(w http.ResponseWriter, r *http.Request, body []byte
 		log.Printf("[fp] SONDE DÉTECTÉE — dry_run actif, aucun envoi vers l'upstream externe model=%s", clientModel)
 		return false
 	}
-	key := rerouteIdentity(r, body)
+	key := rerouteIdentity(r, body, rr.ClientIDHeader)
 	allowed, reason := rr.Decide(r.Context(), key, time.Now())
 	if !allowed {
 		log.Printf("[fp] reroutage refusé (%s) -> route normale model=%s", reason, clientModel)

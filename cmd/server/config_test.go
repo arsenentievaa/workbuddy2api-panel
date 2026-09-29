@@ -1029,3 +1029,29 @@ func TestTelegramEnvOverride(t *testing.T) {
 		t.Fatalf("identifiants Telegram non repris: %+v", c.Telegram)
 	}
 }
+
+// TestFPRouteClientIDHeader : l'en-tête d'isolation a un défaut, peut être renommé, et
+// peut être vidé explicitement pour revenir au repli par conversation.
+func TestFPRouteClientIDHeader(t *testing.T) {
+	c := Default()
+	if err := c.normalize(); err != nil {
+		t.Fatal(err)
+	}
+	if c.FPRoute.ClientIDHeader != "X-Client-Id" {
+		t.Fatalf("en-tête par défaut : %q", c.FPRoute.ClientIDHeader)
+	}
+
+	dir := t.TempDir()
+	fp := filepath.Join(dir, "c.json")
+	os.WriteFile(fp, []byte(`{"fp_observe":{"enabled":true},"fp_route":{"enabled":true,"client_id_header":" X-Client-Ident "}}`), 0o600)
+	if got, err := Load(fp); err != nil || got.FPRoute.ClientIDHeader != "X-Client-Ident" {
+		t.Fatalf("en-tête non repris ou non normalisé : %q (%v)", got.FPRoute.ClientIDHeader, err)
+	}
+
+	// Vide = isolation par client désactivée (repli conversation) : la valeur ne doit
+	// PAS être remplacée par le défaut, sinon on ne pourrait pas la désactiver.
+	os.WriteFile(fp, []byte(`{"fp_observe":{"enabled":true},"fp_route":{"enabled":true,"client_id_header":""}}`), 0o600)
+	if got, err := Load(fp); err != nil || got.FPRoute.ClientIDHeader != "" {
+		t.Fatalf("en-tête vide doit rester vide : %q (%v)", got.FPRoute.ClientIDHeader, err)
+	}
+}

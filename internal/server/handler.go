@@ -266,6 +266,7 @@ func (h *Handler) status(w http.ResponseWriter, r *http.Request) {
 				"model":          rr.Target.Path,
 				"model_cible":    rr.ModelDefault,
 				"plafond_part":   rr.Stats.CapPerHour(),
+				"isolation":      rr.IsolationMode(),
 				"plafond_global": rr.Stats.GlobalCapPerHour(),
 				"alertes":        h.alertStats(),
 			}
@@ -1136,11 +1137,15 @@ type FPCounters struct {
 	CapBlocked       int64
 	GlobalCapBlocked int64
 	HealthBlocked    int64
-	// ReroutedKeys : nombre de seaux d'isolation distincts ayant consommé du quota.
-	// Expose la limite structurelle du plafond derrière NewAPI (une seule clé de
-	// données pour tous les clients) : si cette valeur reste à 1 alors que le trafic
-	// est varié, le plafond « par client » est en réalité global.
+	// reroutedKeys : nombre de seaux d'isolation distincts ayant consommé du quota.
+	// Expose la limite structurelle du plafond : si cette valeur reste à 1 alors que le
+	// trafic est varié, le plafond « par client » est en réalité global.
 	reroutedKeys map[string]struct{}
+	// IdentitySources : nombre de quotas consommés par ORIGINE de la clé (client /
+	// conv / auth / key). C'est le seul moyen de constater depuis /status que l'en-tête
+	// d'identité client arrive vraiment — sans ce compteur, une isolation par client
+	// configurée mais jamais alimentée resterait invisible.
+	identitySources map[string]int64
 }
 
 // fpCapWindow : fenêtre glissante du plafond anti-abus.
@@ -1172,6 +1177,7 @@ func NewFPCounters(capPerHour int, dryRun bool, corroborationSignals []string, c
 		windows:              map[string][]time.Time{},
 		CappedClient:         map[string]bool{},
 		reroutedKeys:         map[string]struct{}{},
+		identitySources:      map[string]int64{},
 	}
 }
 
@@ -1229,7 +1235,21 @@ func (c *FPCounters) AllowReroute(key string, now time.Time) (bool, string) {
 	if c.reroutedKeys != nil {
 		c.reroutedKeys[key] = struct{}{}
 	}
+	if c.identitySources != nil {
+		c.identitySources[identitySource(key)]++
+	}
 	return true, ""
+}
+
+// identitySource : origine de la clé d'isolation, lisable dans /status. La distinction
+// « client » / « conv » est ce qui permet de vérifier que l'isolation par client final
+// est RÉELLEMENT alimentée (l'en-tête injecté par l'amont) et pas seulement configurée.
+func identitySource(key string) string {
+	i := strings.IndexByte(key, ':')
+	if i <= 0 {
+		return "aucune"
+	}
+	return key[:i]
 }
 
 // NoteRerouteOK / NoteRerouteFailure / NoteHealthBlocked : compteurs d'exécution.
@@ -1329,6 +1349,10 @@ func (c *FPCounters) Snapshot() map[string]any {
 	for k, v := range c.IgnoredSignals {
 		ign[k] = v
 	}
+	src := make(map[string]int64, len(c.identitySources))
+	for k, v := range c.identitySources {
+		src[k] = v
+	}
 	return map[string]any{
 		"analyzed": c.Total, "would_route": c.Routed,
 		"by_signal": by, "last_seen": c.LastSeen,
@@ -1347,6 +1371,7 @@ func (c *FPCounters) Snapshot() map[string]any {
 		"global_cap_blocked":      c.GlobalCapBlocked,
 		"health_blocked":          c.HealthBlocked,
 		"distinct_clients":        len(c.reroutedKeys),
+		"identity_sources":        src,
 	}
 }
 
