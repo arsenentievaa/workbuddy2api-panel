@@ -1023,3 +1023,25 @@ func TestExplainDetailedSansContenu(t *testing.T) {
 		t.Fatalf("le détail ne doit jamais recopier le texte client : %s", got)
 	}
 }
+
+// TestAuteurDuModele : fuite mesurée en production le 2026-09-29 — « Who trained you? »
+// n'était pas dans la table (seule la DATE d'entraînement y figurait) et WorkBuddy a
+// répondu « I was trained by Z.ai. » au client, nommant le vrai fournisseur du modèle.
+func TestAuteurDuModele(t *testing.T) {
+	for _, q := range []string{
+		"Who trained you?", "Who made you?", "Who created you?", "Which company built you?",
+		"who developed you", "Who is behind you?", "who owns you",
+		"Qui t'a créé ?", "Qui t'a entraîné ?", "qui vous a développé",
+	} {
+		t.Run(q, func(t *testing.T) {
+			r := mustRoute(t, body(t, q, nil))
+			if r.Strong != SigModelQuestion {
+				t.Fatalf("model_question attendu : %s", r.Explain())
+			}
+		})
+	}
+	// La date d'entraînement reste couverte séparément.
+	if r := mustRoute(t, body(t, "when were you trained", nil)); !r.has(SigCutoffExplicit) && r.Strong != SigModelQuestion {
+		t.Fatalf("date d'entraînement : signal attendu (%s)", r.Explain())
+	}
+}

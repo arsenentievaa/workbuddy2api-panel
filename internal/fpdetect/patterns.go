@@ -173,6 +173,31 @@ var modelIdentityPhrases = []string{
 	"ты gpt",
 	"что ты за модель",
 
+	// Ajouts mesurés en production le 2026-09-29 : « Who trained you? » a été servi par
+	// WorkBuddy, qui a répondu « I was trained by Z.ai. » — le vrai fournisseur du modèle,
+	// nommé au client qui avait demandé claude-opus-5. Les tournures « qui t'a fait /
+	// entraîné / développé » manquaient : la table ne couvrait que la DATE d'entraînement
+	// (« when were you trained »), pas l'AUTEUR. Formes volontairement non ambiguës
+	// (aucune ne décrit une question légitime sur un produit).
+	"which company built you",
+	"which company created you",
+	"which company made you",
+	"who built you",
+	"who created you",
+	"who developed you",
+	"who is behind you",
+	"who made you",
+	"who owns you",
+	"who trained you",
+	"quelle entreprise t'a créé",
+	"quelle entreprise t'a développé",
+	"qui t'a créé",
+	"qui t'a développé",
+	"qui t'a entrainé",
+	"qui t'a entraîné",
+	"qui vous a créé",
+	"qui vous a développé",
+
 	// --- Arabe ---
 	// Les mêmes tournures sont doublées sans hamza : au clavier arabe, « أنت » s'écrit
 	// presque toujours « انت » et « أي » s'écrit « اي ».

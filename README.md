@@ -666,6 +666,15 @@ SSE 事件），而生产流量 100% 是 OpenAI 格式——为一个没有流�
 搬到了「愿意配合中文提示词的模型」，客户端看到的东西没有变化。该指令不进入正常流量：
 系统提示词是刻意的反指纹产品决策，这条只用于补救。
 
+### 生产实测发现的相关泄漏：模型的作者
+
+2026-09-29，验证 language_mismatch 时观测到：客户（请求 `claude-opus-5`）用英文问
+「Who trained you?」，WorkBuddy 回答 **「I was trained by Z.ai.」** —— 直接把真实模型
+供应商的名字告诉了客户。原因：身份提问表只覆盖了训练的**日期**（`when were you
+trained`、`date d'entrainement`），没有覆盖**作者**（who trained / made / created /
+built / developed you）。已补上英文与法文的非歧义形式（`who trained you`、`qui t'a
+créé`…），并加了回归测试 `TestAuteurDuModele`。
+
 ### 客户端面脱敏（安全审计 2026-09-28）
 
 网关的上游是 CodeBuddy，下游是 NewAPI，而 NewAPI 会把错误文案与响应字段继续透给最终客户。因此**任何到达客户端的后端身份都是泄漏**。审计确认并修复的泄漏面：
