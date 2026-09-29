@@ -794,3 +794,89 @@ func TestQueueNegativeClamped(t *testing.T) {
 		t.Errorf("negative values should clamp to 0: %d/%v", c.Pool.QueueMaxWaiters, c.QueueMaxWaitDur)
 	}
 }
+
+// --- fp_observe : valeurs par défaut et validation des langues -------------------
+
+// TestFPObserveDefaults : la section absente d'un fichier doit rester inerte
+// (observation éteinte) et dry_run doit valoir true — deux gestes explicites sont
+// nécessaires avant qu'une requête client puisse partir vers un modèle payant.
+func TestFPObserveDefaults(t *testing.T) {
+	c := Default()
+	if err := c.normalize(); err != nil {
+		t.Fatal(err)
+	}
+	if c.FPObserve.Enabled {
+		t.Error("enabled devrait être false par défaut")
+	}
+	if !c.FPObserve.DryRun {
+		t.Error("dry_run devrait être true par défaut")
+	}
+	if c.FPObserve.Threshold != 4.0 {
+		t.Errorf("threshold=%v want 4.0", c.FPObserve.Threshold)
+	}
+	if c.FPObserve.MaxReroutesPerHour != 20 {
+		t.Errorf("max_reroutes_per_hour=%d want 20", c.FPObserve.MaxReroutesPerHour)
+	}
+	if len(c.FPObserve.Languages) != 17 {
+		t.Errorf("17 langues par défaut attendues, %d", len(c.FPObserve.Languages))
+	}
+}
+
+func TestFPObserveParsedFromFile(t *testing.T) {
+	dir := t.TempDir()
+	fp := filepath.Join(dir, "c.json")
+	os.WriteFile(fp, []byte(`{"fp_observe":{"enabled":true,"threshold":2.5,
+		"dry_run":false,"max_reroutes_per_hour":3,"repeat_minutes":9,"repeat_count":7,
+		"strong_signals":["glitch_token"],"weights":{"very_short":3.5},
+		"glitch_csv":"/tmp/g.csv","languages":["fr","en"]}}`), 0o600)
+	c, err := Load(fp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := c.FPObserve
+	if !got.Enabled || got.DryRun || got.Threshold != 2.5 || got.MaxReroutesPerHour != 3 {
+		t.Fatalf("valeurs non reprises : %+v", got)
+	}
+	if got.RepeatMinutes != 9 || got.RepeatCount != 7 || got.GlitchCSV != "/tmp/g.csv" {
+		t.Fatalf("valeurs non reprises : %+v", got)
+	}
+	if len(got.StrongSignals) != 1 || got.StrongSignals[0] != "glitch_token" {
+		t.Fatalf("strong_signals non repris : %v", got.StrongSignals)
+	}
+	if got.Weights["very_short"] != 3.5 {
+		t.Fatalf("weights non repris : %v", got.Weights)
+	}
+	if len(got.Languages) != 2 || got.Languages[0] != "fr" {
+		t.Fatalf("languages non repris : %v", got.Languages)
+	}
+}
+
+// TestFPObserveLangueInconnue : déclarer une langue que le détecteur ne couvre pas
+// doit échouer au chargement — un faux sentiment de couverture est pire qu'une erreur.
+func TestFPObserveLangueInconnue(t *testing.T) {
+	dir := t.TempDir()
+	fp := filepath.Join(dir, "c.json")
+	os.WriteFile(fp, []byte(`{"fp_observe":{"enabled":true,"languages":["fr","xx"]}}`), 0o600)
+	_, err := Load(fp)
+	if err == nil {
+		t.Fatal("une langue inconnue doit faire échouer le chargement")
+	}
+	if !strings.Contains(err.Error(), "xx") {
+		t.Fatalf("le message doit nommer la langue fautive : %v", err)
+	}
+}
+
+// TestFPObservePlafondNegatifRamasse : une valeur absurde retombe sur le défaut
+// plutôt que de laisser passer un plafond nul (qui bloquerait tout en phase 2).
+func TestFPObservePlafondNegatifRamasse(t *testing.T) {
+	dir := t.TempDir()
+	fp := filepath.Join(dir, "c.json")
+	os.WriteFile(fp, []byte(`{"fp_observe":{"enabled":true,"max_reroutes_per_hour":-1}}`), 0o600)
+	c, err := Load(fp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.FPObserve.MaxReroutesPerHour != 20 {
+		t.Errorf("plafond=%d want 20", c.FPObserve.MaxReroutesPerHour)
+	}
+}

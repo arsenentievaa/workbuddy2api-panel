@@ -82,5 +82,17 @@
     "enabled": true,
     "ttl": "30m",
     "gc_interval": "5m"
+  },
+  "fp_observe": {
+    "enabled": false,
+    "threshold": 4.0,
+    "weights": {},
+    "strong_signals": [],
+    "glitch_csv": "",
+    "repeat_minutes": 5,
+    "repeat_count": 4,
+    "dry_run": true,
+    "max_reroutes_per_hour": 20,
+    "languages": ["ar", "de", "en", "es", "fr", "hi", "it", "ja", "ko", "nl", "pl", "pt", "ru", "tr", "vi", "zh-Hans", "zh-Hant"]
   }
 }

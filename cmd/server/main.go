@@ -14,10 +14,12 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
 	"github.com/linguo2625469/workbuddy2api-panel/internal/auth"
+	"github.com/linguo2625469/workbuddy2api-panel/internal/fpdetect"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/livecfg"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/panel"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/pool"
@@ -261,6 +263,49 @@ func main() {
 	log.SetOutput(io.MultiWriter(os.Stderr, pn.Logs()))
 	server.SetChatLogOutput(io.MultiWriter(os.Stdout, pn.Logs()))
 
+	// Observation des sondes de fingerprinting (phase 1). Aucune E/S, aucun coût :
+	// l'analyse est pure et sa décision n'est que journalisée.
+	var fpDet *fpdetect.Detector
+	var fpCounters *server.FPCounters
+	if cfg.FPObserve.Enabled {
+		fpCfg := fpdetect.DefaultConfig()
+		fpCfg.Threshold = cfg.FPObserve.Threshold
+		fpCfg.RepeatWindow = time.Duration(cfg.FPObserve.RepeatMinutes) * time.Minute
+		fpCfg.RepeatCount = cfg.FPObserve.RepeatCount
+		for k, v := range cfg.FPObserve.Weights {
+			fpCfg.Weights[k] = v
+		}
+		if len(cfg.FPObserve.StrongSignals) > 0 {
+			fpCfg.StrongSignals = cfg.FPObserve.StrongSignals
+		}
+		if cfg.FPObserve.GlitchCSV != "" {
+			if toks, err := fpdetect.LoadGlitchCSV(cfg.FPObserve.GlitchCSV); err != nil {
+				log.Printf("fp_observe: %v — liste de jetons par défaut conservée", err)
+			} else {
+				fpCfg.GlitchTokens = make([]string, 0, len(toks))
+				fpCfg.GlitchMeta = make(map[string]string, len(toks))
+				for _, g := range toks {
+					fpCfg.GlitchTokens = append(fpCfg.GlitchTokens, g.Token)
+					if g.ModelSeries != "" {
+						fpCfg.GlitchMeta[g.Token] = g.ModelSeries
+					}
+				}
+			}
+		}
+		fpDet = fpdetect.New(fpCfg)
+		fpCounters = server.NewFPCounters(cfg.FPObserve.MaxReroutesPerHour, cfg.FPObserve.DryRun)
+		// Les langues déclarées sont journalisées : c'est la trace vérifiable de la
+		// couverture annoncée, et le panneau relit la valeur dans /status.
+		labels := make([]string, 0, len(cfg.FPObserve.Languages))
+		for _, code := range cfg.FPObserve.Languages {
+			labels = append(labels, code+" ("+fpdetect.LanguageLabel(code)+")")
+		}
+		log.Printf("fp_observe: activé (OBSERVATION SEULE, aucun reroutage) seuil=%.1f jetons=%d signaux_forts=%d dry_run=%v plafond=%d/h/client langues=%d %s",
+			fpCfg.Threshold, len(fpCfg.GlitchTokens), len(fpCfg.StrongSignals),
+			cfg.FPObserve.DryRun, cfg.FPObserve.MaxReroutesPerHour,
+			len(cfg.FPObserve.Languages), strings.Join(labels, ", "))
+	}
+
 	h := server.NewHandler(server.Config{
 		Pool:         p,
 		Upstream:     up,
@@ -276,6 +321,8 @@ func main() {
 		PromptText:   cfg.PromptText,
 		// handler 侧第三道闸（global realm）：false（显式逃生门）时不列 global: 模型名。
 		GlobalEnabled: cfg.Global.Enabled,
+		FPDetect:      fpDet,
+		FPStats:       fpCounters,
 	})
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -443,6 +490,10 @@ func restartRequiredFields(c *Config) []string {
 		out = append(out, "upstash")
 	}
 	out = append(out, "session_sticky.ttl", "session_sticky.gc_interval")
+	// fp_observe 的检测器与 compteurs 在启动时装配（阈值、权重、语言、glitch CSV
+	// 都在构造期读入），保存配置本身不重建它们：必须在面板提示重启，否则用户会
+	// 以为已经开启观察而日志里什么都没有。
+	out = append(out, "fp_observe")
 	return out
 }
 

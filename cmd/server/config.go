@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/linguo2625469/workbuddy2api-panel/internal/fpdetect"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/prompt"
 )
 
@@ -161,6 +162,35 @@ type Config struct {
 		QueueMaxWait    string `json:"queue_max_wait"`    // 默认 "30s"
 	} `json:"pool"`
 
+	// FPObserve : observation des sondes de fingerprinting (phase 1).
+	//
+	// Les requêtes sont analysées et la décision est JOURNALISÉE, mais rien n'est
+	// rerouté : le chemin « servir depuis le vrai modèle » n'est pas encore
+	// implémenté (il touche le chemin critique de la passerelle et doit être calibré
+	// sur ces relevés avant d'être activé). Le nom de la section dit ce qu'elle fait.
+	FPObserve struct {
+		Enabled       bool               `json:"enabled"`        // défaut false
+		Threshold     float64            `json:"threshold"`      // défaut 4.0
+		Weights       map[string]float64 `json:"weights"`        // surcharge des poids
+		StrongSignals []string           `json:"strong_signals"` // signaux suffisants seuls
+		GlitchCSV     string             `json:"glitch_csv"`     // chemin d'un CSV glitch-lens
+		RepeatMinutes int                `json:"repeat_minutes"` // fenêtre de répétition, défaut 5
+		RepeatCount   int                `json:"repeat_count"`   // répétitions déclenchantes, défaut 4
+		// DryRun : même une fois le reroutage implémenté, true interdit tout envoi vers
+		// l'upstream réel. Défaut true — il faut deux gestes explicites (enabled +
+		// dry_run=false) pour qu'une requête client parte vers le modèle payant.
+		DryRun bool `json:"dry_run"`
+		// MaxReroutesPerHour plafonne le nombre de reroutages par client et par heure
+		// glissante (anti-abus : un client qui boucle sur une sonde ne doit pas
+		// consommer le quota payant). Défaut 20. En observation seule, il ne bloque
+		// rien : il sert à mesurer combien de requêtes AURAIENT été plafonnées.
+		MaxReroutesPerHour int `json:"max_reroutes_per_hour"`
+		// Languages : langues déclarées couvertes. Défaut : les 17 langues des tables.
+		// Un code inconnu fait échouer le chargement (mieux qu'un faux sentiment de
+		// couverture).
+		Languages []string `json:"languages"`
+	} `json:"fp_observe"`
+
 	SessionSticky struct {
 		Enabled    bool   `json:"enabled"`     // 默认 true
 		TTL        string `json:"ttl"`         // 会话绑定 TTL，默认 "30m"
@@ -238,6 +268,14 @@ func Default() *Config {
 	// 没有意义；30s 是「多数冷启动延迟能被吸收、又不易撞客户端超时」的折中。
 	c.Pool.QueueMaxWaiters = 200
 	c.Pool.QueueMaxWait = "30s"
+	// Observation des sondes : désactivée par défaut (aucun coût tant qu'on ne
+	// l'allume pas), seuil et fenêtre alignés sur les défauts du paquet fpdetect.
+	c.FPObserve.Enabled = false
+	c.FPObserve.Threshold = 4.0
+	c.FPObserve.RepeatMinutes = 5
+	c.FPObserve.RepeatCount = 4
+	c.FPObserve.DryRun = true
+	c.FPObserve.MaxReroutesPerHour = 20
 	c.SessionSticky.Enabled = true
 	c.SessionSticky.TTL = "30m"
 	c.SessionSticky.GCInterval = "5m"
@@ -460,6 +498,27 @@ func (c *Config) normalize() error {
 	}
 	if c.Pool.QueueMaxWaiters < 0 {
 		c.Pool.QueueMaxWaiters = 0
+	}
+	if c.FPObserve.Threshold <= 0 {
+		c.FPObserve.Threshold = 4.0
+	}
+	if c.FPObserve.RepeatMinutes <= 0 {
+		c.FPObserve.RepeatMinutes = 5
+	}
+	if c.FPObserve.RepeatCount <= 0 {
+		c.FPObserve.RepeatCount = 4
+	}
+	if c.FPObserve.MaxReroutesPerHour <= 0 {
+		c.FPObserve.MaxReroutesPerHour = 20
+	}
+	if len(c.FPObserve.Languages) == 0 {
+		c.FPObserve.Languages = fpdetect.SupportedLanguageCodes()
+	}
+	for _, code := range c.FPObserve.Languages {
+		if !fpdetect.IsSupportedLanguage(code) {
+			return fmt.Errorf("fp_observe.languages: langue inconnue %q (connues : %s)",
+				code, strings.Join(fpdetect.SupportedLanguageCodes(), ", "))
+		}
 	}
 	if c.Pool.BreakerThreshold <= 0 {
 		c.Pool.BreakerThreshold = 3

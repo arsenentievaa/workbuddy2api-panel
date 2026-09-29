@@ -414,6 +414,45 @@ curl -s http://localhost:7863/v1/chat/completions \
 
 **软冷却指数退避**（与熔断器并存的第二条升级线）：软限流的**冷却时长**本身也按连续次数退避——同一账号连续触发软冷却时 `soft_rate × 2^(连续次数-1)`，封顶 `soft_rate_max`。计数 `soft_streak` 独立于熔断器的 `fails`，只在**成功**或**签到解冻**时清零，随 `state.json` 持久化。
 
+### 指纹探测观察（fp_observe，阶段 1）
+
+检测「模型指纹探测」请求：客户端试图通过请求形态判断真正回答的模型（tokenizer 印记、
+glitch token、身份提问、PDF、异常工具、重复请求…）。设计文档与完整方法列表见
+`internal/fpdetect/` 与 `lumia-fp-router/README.md`。
+
+**本阶段只观察、只记录，不做任何重定向。** 命名为 `fp_observe` 而非 `fp_routing`，
+是因为「改由真模型回答」这条路径尚未实现：它改的是网关的关键路径，且必须先拿真实
+流量校准阈值。启用后每次分析都会写一条日志，`/status` 的 `fp_observe` 字段给出
+计数（`analyzed` / `would_route` / `by_signal`），据此判断规则是否过宽。
+
+| 键 | 默认 | 说明 |
+|---|---|---|
+| `fp_observe.enabled` | `false` | 开启观察（纯计算，无 I/O、无额外开销） |
+| `fp_observe.threshold` | `4.0` | 累计分数阈值 |
+| `fp_observe.weights` | `{}` | 按信号名覆盖权重 |
+| `fp_observe.strong_signals` | `[]` | 单独即可判定为探测的信号 |
+| `fp_observe.glitch_csv` | 空 | glitch-lens 格式的 CSV 路径（覆盖内置列表） |
+| `fp_observe.repeat_minutes` / `repeat_count` | `5` / `4` | 重复请求检测窗口与阈值 |
+| `fp_observe.dry_run` | `true` | 即使阶段 2 落地，`true` 也禁止任何请求发往真模型 |
+| `fp_observe.max_reroutes_per_hour` | `20` | 每客户端每滚动小时的重定向上限（防滥用） |
+| `fp_observe.languages` | 17 种 | 声明覆盖的语言；未知代码在加载时报错 |
+
+`/status` 的 `fp_observe` 除了 `analyzed` / `would_route` / `by_signal`，还给出
+`cap_per_hour_per_client`、`over_cap`（**本来会被**上限挡下的次数）、`capped_clients`、
+`unattributed`（无会话键、无法按客户端计量的次数）与 `dry_run`。阶段 1 不拦截任何
+请求：上限只用于**测量**，因为上限值必须在真实流量上校准——等重定向上线后再测就太晚，
+那时已经产生真模型的账单。
+
+语言覆盖是可验证的，不是声明式的：`internal/fpdetect/languages.go` 为每种语言保存
+一个必须在身份提问表中真实出现的样本片段，`TestCouvertureDesDixSeptLangues` 逐个
+断言，配置里写未知语言代码会直接让加载失败。
+
+信号分**强**（单独即可判定：glitch token、身份提问、知识截止日期提问、海量重复、
+结构化重复、可疑工具名、PDF、重复请求）与**弱**（需累积：请求极短、近期事实、
+工具数量、thinking、异常流参数）。这个区分是刻意的：生产实测 65% 的请求超过
+50 000 tokens（agent 形态），「工具多于 5 个」或「启用 thinking」若单独判定，会把
+绝大多数正常客户流量送去昂贵的真模型。
+
 ### 客户端面脱敏（安全审计 2026-09-28）
 
 网关的上游是 CodeBuddy，下游是 NewAPI，而 NewAPI 会把错误文案与响应字段继续透给最终客户。因此**任何到达客户端的后端身份都是泄漏**。审计确认并修复的泄漏面：

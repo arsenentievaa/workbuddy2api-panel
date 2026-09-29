@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/linguo2625469/workbuddy2api-panel/internal/auth"
+	"github.com/linguo2625469/workbuddy2api-panel/internal/fpdetect"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/httpauth"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/livecfg"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/logfmt"
@@ -46,6 +47,14 @@ type Config struct {
 	// Live 运行期可变配置（面板在线改 api_key / soft_rate / 脱敏开关时立即生效）。
 	// nil 时回退静态字段（测试与裸用场景）。
 	Live *livecfg.Holder
+
+	// FPDetect détecteur de sondes de fingerprinting (phase 1 : observation).
+	// nil = observation désactivée (aucun coût). Quand il est fourni, chaque requête
+	// de complétion est analysée et la décision est journalisée — mais jamais
+	// appliquée : le reroutage vers le vrai modèle n'est pas implémenté.
+	FPDetect *fpdetect.Detector
+	// FPStats compteurs d'observation (nil = pas de comptage).
+	FPStats *FPCounters
 
 	// PromptMode "custom"（网关用自有提示词替换 system）/ "passthrough"（透传）。
 	PromptMode string
@@ -224,6 +233,15 @@ func (h *Handler) status(w http.ResponseWriter, r *http.Request) {
 		// 饱和排队运行态（queue.go）：等待中请求数、队首等待时长、累计入队/获名额/
 		// 超时/队满计数。与 healthy/in_flight_full 对照即可判断「是没号还是只是占满」。
 		"queue": h.cfg.Pool.QueueStats(),
+		// fp_observe : observation des sondes de fingerprinting (phase 1). Absent si
+		// l'observation est désactivée — le panneau distingue ainsi « pas de sonde »
+		// de « observation éteinte ».
+		"fp_observe": func() any {
+			if h.cfg.FPStats == nil {
+				return nil
+			}
+			return h.cfg.FPStats.Snapshot()
+		}(),
 		// cost_explore 事件与 per-model 时间戳（时间值由 encoding/json 写 RFC3339）。
 		"cost_explore": map[string]any{
 			"events_total": exploreEvents,
@@ -509,6 +527,26 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		Model  string `json:"model"`
 	}
 	_ = json.Unmarshal(body, &peek)
+
+	// Observation des sondes de fingerprinting (phase 1). Placée avant toute
+	// sélection de compte : elle doit voir le corps d'origine, et son échec ne doit
+	// jamais perturber la requête (fpdetect ne panique pas et ne fait aucune E/S).
+	if h.cfg.FPDetect != nil {
+		fpKey := fpClientKey(body)
+		res := h.cfg.FPDetect.Analyze(body, fpKey)
+		if res.Route {
+			// Le plafond n'est PAS appliqué en phase 1 (dry_run implicite) : on mesure
+			// ce qui serait plafonné, pour choisir la valeur avant d'activer.
+			capped := false
+			if h.cfg.FPStats != nil {
+				capped = h.cfg.FPStats.Record(fpKey, res, time.Now())
+			}
+			log.Printf("[fp] SONDE DÉTECTÉE (observation seule, aucun reroutage) model=%s plafond_atteint=%v %s",
+				peek.Model, capped, res.Explain())
+		} else if h.cfg.FPStats != nil {
+			h.cfg.FPStats.Record(fpKey, res, time.Now())
+		}
+	}
 
 	// realm 前缀解析（D6）：model 名可能带 "[realm:]" 前缀。剥出 realm + bareModel，
 	// bareModel 用于选号/粘性/出站 body 重写（前缀是网关侧路由协议，上游只认裸名）。
@@ -1003,6 +1041,147 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	hint = upstream.SafeHint(hint, clientModel, bareModel)
 	writeOpenAIErrorHint(w, status, code, msg, hint)
 	st.status = status
+}
+
+// FPCounters agrège les décisions d'observation pour /status. Les noms de signaux
+// sont stables (fpdetect.SigXxx) : le panneau peut les afficher tels quels.
+//
+// Il porte aussi le plafond anti-abus « N reroutages par client et par heure » :
+// en observation seule rien n'est bloqué, mais on compte ce qui AURAIT été plafonné.
+// C'est la donnée qui manque pour choisir la valeur du plafond avant d'activer le
+// reroutage — la mesurer après coup serait trop tard (facture payante).
+type FPCounters struct {
+	mu       sync.Mutex
+	Total    int64
+	Routed   int64
+	BySignal map[string]int64
+	LastSeen string
+
+	capPerHour   int
+	dryRun       bool
+	windows      map[string][]time.Time // client -> horodatages des décisions « router »
+	OverCap      int64                  // décisions au-delà du plafond
+	CappedClient map[string]bool        // clients ayant atteint le plafond
+	Unattributed int64                  // décisions sans clé de client : plafond inapplicable
+}
+
+// fpCapWindow : fenêtre glissante du plafond anti-abus.
+const fpCapWindow = time.Hour
+
+// fpCapMaxClients borne la mémoire du compteur (même esprit que fpdetect.State).
+const fpCapMaxClients = 4096
+
+// NewFPCounters construit le compteur avec son plafond horaire (<=0 : plafond par
+// défaut) et l'état dry-run affiché par /status.
+func NewFPCounters(capPerHour int, dryRun bool) *FPCounters {
+	if capPerHour <= 0 {
+		capPerHour = 20
+	}
+	return &FPCounters{
+		BySignal:     map[string]int64{},
+		capPerHour:   capPerHour,
+		dryRun:       dryRun,
+		windows:      map[string][]time.Time{},
+		CappedClient: map[string]bool{},
+	}
+}
+
+// Record enregistre une analyse pour le client donné (clé vide = non attribuable).
+// Retourne true si cette décision dépasserait le plafond horaire du client.
+func (c *FPCounters) Record(client string, r fpdetect.Result, now time.Time) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.BySignal == nil {
+		c.BySignal = map[string]int64{}
+	}
+	c.Total++
+	for _, s := range r.Signals {
+		c.BySignal[s.Name]++
+	}
+	c.LastSeen = now.UTC().Format(time.RFC3339)
+	if !r.Route {
+		return false
+	}
+	c.Routed++
+	if client == "" {
+		// Sans clé de session, aucun plafond n'est applicable : on le compte au lieu
+		// de retomber sur un seau global (un client bavard plafonnerait les autres).
+		c.Unattributed++
+		return false
+	}
+	if c.windows == nil {
+		c.windows = map[string][]time.Time{}
+	}
+	if len(c.windows) >= fpCapMaxClients {
+		c.pruneWindows(now)
+	}
+	w := pruneTimes(c.windows[client], now.Add(-fpCapWindow))
+	w = append(w, now)
+	c.windows[client] = w
+	if len(w) > c.capPerHour {
+		c.OverCap++
+		c.CappedClient[client] = true
+		return true
+	}
+	return false
+}
+
+// pruneTimes retire les horodatages antérieurs à cut (la tranche est triée).
+func pruneTimes(ts []time.Time, cut time.Time) []time.Time {
+	i := 0
+	for i < len(ts) && ts[i].Before(cut) {
+		i++
+	}
+	if i == 0 {
+		return ts
+	}
+	return append([]time.Time(nil), ts[i:]...)
+}
+
+// pruneWindows élimine les clients sans activité récente. Appelé seulement quand le
+// nombre de clients atteint la borne, donc amorti.
+func (c *FPCounters) pruneWindows(now time.Time) {
+	cut := now.Add(-fpCapWindow)
+	for k, ts := range c.windows {
+		if len(pruneTimes(ts, cut)) == 0 {
+			delete(c.windows, k)
+		}
+	}
+	if len(c.windows) >= fpCapMaxClients {
+		// Toujours saturé (rafale) : on repart de zéro plutôt que de croître sans borne.
+		c.windows = map[string][]time.Time{}
+	}
+}
+
+// Snapshot retourne une copie sûre pour la sérialisation.
+func (c *FPCounters) Snapshot() map[string]any {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	by := make(map[string]int64, len(c.BySignal))
+	for k, v := range c.BySignal {
+		by[k] = v
+	}
+	return map[string]any{
+		"analyzed": c.Total, "would_route": c.Routed,
+		"by_signal": by, "last_seen": c.LastSeen,
+		"dry_run":                 c.dryRun,
+		"cap_per_hour_per_client": c.capPerHour,
+		"over_cap":                c.OverCap,
+		"capped_clients":          len(c.CappedClient),
+		"unattributed":            c.Unattributed,
+	}
+}
+
+// fpClientKey identifie le demandeur pour le signal de répétition. Le client direct
+// de la passerelle est NewAPI : le jeton est constant, donc inutilisable seul. On
+// préfère la clé de session du corps, qui identifie la conversation d'origine ; à
+// défaut, aucune détection de répétition (plutôt qu'un faux positif global).
+func fpClientKey(body []byte) string {
+	k := session.ExtractKey(body)
+	if k == "" {
+		return ""
+	}
+	return k
 }
 
 // queueFullHint / queueTimeoutHint 是饱和排队的 gateway_hint（本地调度事实，
