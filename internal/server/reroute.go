@@ -111,8 +111,16 @@ func (rr *Rerouter) Probe(ctx context.Context) (bool, bool) {
 	if rr == nil || rr.Health == nil {
 		return false, false
 	}
+	// La sonde interroge le chemin de SANTÉ, pas le chemin de complétion : interroger
+	// /v1/chat/completions en GET renvoyait un 404 et l'upstream était déclaré malsain
+	// en permanence — le reroutage ne partait jamais. HealthPath était configuré mais
+	// jamais utilisé.
+	probe := rr.Target
+	if strings.TrimSpace(rr.HealthPath) != "" {
+		probe.Path = rr.HealthPath
+	}
 	ok, transition, err := rr.Health.Healthy(ctx, func(ctx context.Context) error {
-		return rr.Upstream.ProbeExternal(ctx, rr.Target)
+		return rr.Upstream.ProbeExternal(ctx, probe)
 	})
 	if transition && rr.Alerts != nil {
 		if ok {

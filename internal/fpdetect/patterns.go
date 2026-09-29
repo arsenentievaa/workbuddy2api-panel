@@ -25,6 +25,8 @@
 
 package fpdetect
 
+import "strings"
+
 // modelIdentityPhrases : formulations qui demandent explicitement l'identité ou le
 // nom du modèle qui répond. Signal FORT (SigModelQuestion) : une question d'identité
 // nue n'apparaît pas dans un usage applicatif normal.
@@ -745,31 +747,51 @@ var streamingParamKeys = []string{
 	"stream_options.include_usage",
 }
 
-// suspiciousToolNameFragments : fragments de noms d'outils qui trahissent un outil de
-// test plutôt qu'un outil réel. Liste TECHNIQUE, comparée par sous-chaîne à un nom
-// d'outil mis en minuscules.
-//
-// ATTENTION — SIGNAL FAIBLE (SigToolSuspicious). « test » et « probe » sont très
-// courants dans du vrai code (run_tests, test_runner, probe_health) : ce signal est
-// volontairement non exhaustif et sera pondéré en conséquence. Sa force vient surtout
-// de la combinaison avec d'autres signaux, pas de ces fragments seuls.
+// suspiciousToolNameFragments : fragments qui DÉSIGNENT une méthode d'empreinte. Un
+// outil qui s'appelle ainsi n'a pas d'usage ordinaire dans une application métier :
+// c'est un outil de test construit pour interroger le modèle. Signal FORT.
 var suspiciousToolNameFragments = []string{
 	"benchmark",
 	"canary",
 	"count_tokens",
-	"detect",
-	"dummy",
+	"detect_model",
 	"echo_test",
-	"fake",
 	"fingerprint",
 	"get_model",
 	"model_info",
-	"ping",
-	"probe",
-	"synthetic",
-	"test",
+	"model_probe",
+	"probe_model",
 	"token_count",
 	"whoami",
+}
+
+// genericToolNameFragments : fragments BANALS dans du code réel. « test » est dans
+// run_tests, « probe » dans probe_health, « detect » et « ping » dans un outil de
+// diagnostic : la production a montré qu'un agent client légitime les déclare. Signal
+// CONDITIONNEL (SigToolGenericName) — il ne compte qu'avec une corroboration.
+var genericToolNameFragments = []string{
+	"detect",
+	"dummy",
+	"fake",
+	"ping",
+	"probe",
+	"test",
+}
+
+// genericToolName : premier fragment banal trouvé dans un nom d'outil ("" si aucun).
+func genericToolName(tools []map[string]any) string {
+	for _, t := range tools {
+		name := strings.ToLower(toolName(t))
+		if name == "" {
+			continue
+		}
+		for _, frag := range genericToolNameFragments {
+			if frag != "" && strings.Contains(name, frag) {
+				return frag
+			}
+		}
+	}
+	return ""
 }
 
 // toolCountSuspiciousMin : au-delà de ce nombre d'outils déclarés, signal FORT

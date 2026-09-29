@@ -19,7 +19,9 @@ const (
 	SigCutoffExplicit    = "cutoff_explicit"
 	SigMassRepetition    = "mass_repetition"
 	SigRepetitionPattern = "repetition_pattern"
+	SigRepeatedLines     = "repeated_lines"
 	SigToolSuspicious    = "tool_suspicious"
+	SigToolGenericName   = "tool_generic_name"
 	SigToolCountExtreme  = "tool_count_extreme"
 	SigPDFContent        = "pdf_content"
 	SigRepeatRequest     = "repeat_request"
@@ -36,22 +38,32 @@ const (
 // nettement en dessous. Les pénalités ne peuvent annuler un signal fort — c'est
 // volontaire, sinon un test PDF contenant un bloc de code ne serait jamais routé.
 var defaultWeights = map[string]float64{
-	SigGlitchToken:       5.0,
-	SigModelQuestion:     5.0,
-	SigCutoffExplicit:    5.0,
-	SigMassRepetition:    4.0,
+	SigGlitchToken:    5.0,
+	SigModelQuestion:  5.0,
+	SigCutoffExplicit: 5.0,
+	// repetition_pattern reste FORT : il ne réagit qu'à une consigne chiffrée
+	// explicite (« répète le mot pomme 150 fois »), qu'on ne rencontre pas dans un
+	// usage normal.
 	SigRepetitionPattern: 4.0,
-	SigToolSuspicious:    4.0,
 	SigRepeatRequest:     4.0,
 
-	// Sous le seuil À DESSEIN (4.0) : ces deux signaux sont « forts mais sujets à
-	// corroboration » (voir Config.CorroborationSignals). Le poids a été baissé de
-	// 4.0 à 2.0 après le relevé de production du 2026-09-29, où trois requêtes
-	// clientes réelles (un agent qui joint un PDF et déclare ses outils) les ont
-	// déclenchés ensemble. Un poids sous le seuil garantit qu'ils ne peuvent pas
-	// router par simple cumul de score : il faut la corroboration ci-dessous.
+	// Sous le seuil À DESSEIN (4.0) : signaux « forts mais sujets à corroboration »
+	// (voir Config.CorroborationSignals). Le relevé de production du 2026-09-29 a
+	// montré, en deux vagues, que ces méthodes réagissent au trafic client légitime
+	// d'un agent :
+	//   pdf_content + tool_count_extreme : pièce jointe et déclaration d'outils ;
+	//   mass_repetition + tool_suspicious + repeated_lines : une série de caractères
+	//   identiques, un nom d'outil contenant « test »/« probe »/« detect », quinze
+	//   lignes identiques — trois choses qu'on trouve dans un prompt de travail
+	//   ordinaire (tableau Markdown, outil run_tests, journal collé).
+	// Un poids sous le seuil garantit qu'aucun d'eux ne peut router par simple cumul
+	// de score : il faut la corroboration ci-dessous.
 	SigToolCountExtreme: 2.0,
 	SigPDFContent:       2.0,
+	SigMassRepetition:   2.0,
+	SigToolSuspicious:   2.0,
+	SigToolGenericName:  2.0,
+	SigRepeatedLines:    2.0,
 
 	SigVeryShort:       1.5,
 	SigRecentFact:      2.0,
@@ -66,10 +78,15 @@ var defaultWeights = map[string]float64{
 	SigLongConversation: -2.0,
 }
 
-// defaultCorroboration : signaux forts qui ne suffisent PAS seuls. Les deux méthodes
-// concernées (pièce jointe, volumétrie d'outils) font partie du fonctionnement normal
-// d'un agent : elles n'ont de valeur que corroborées par une méthode indépendante.
-var defaultCorroboration = []string{SigPDFContent, SigToolCountExtreme}
+// defaultCorroboration : signaux forts qui ne suffisent PAS seuls. Ces méthodes font
+// partie du fonctionnement normal d'un agent (pièce jointe, déclaration d'outils,
+// contenu collé, outil dont le nom contient « test ») : elles n'ont de valeur que
+// corroborées par une méthode indépendante. Chaque entrée vient d'une observation de
+// production, pas d'une intuition.
+var defaultCorroboration = []string{
+	SigPDFContent, SigToolCountExtreme,
+	SigMassRepetition, SigToolGenericName, SigRepeatedLines, SigToolSuspicious,
+}
 
 // DefaultCorroborationSignals retourne la liste par défaut des signaux conditionnels.
 func DefaultCorroborationSignals() []string {
@@ -106,9 +123,9 @@ const corroborationWeakMin = 2
 // agent), envoient couramment plus de 5 outils et activent souvent le raisonnement
 // étendu.
 var defaultStrong = []string{
-	SigGlitchToken, SigModelQuestion, SigCutoffExplicit, SigMassRepetition,
-	SigRepetitionPattern, SigToolSuspicious, SigToolCountExtreme, SigPDFContent,
-	SigRepeatRequest,
+	SigGlitchToken, SigModelQuestion, SigCutoffExplicit, SigRepetitionPattern,
+	SigRepeatRequest, SigMassRepetition, SigToolSuspicious, SigToolCountExtreme,
+	SigPDFContent, SigRepeatedLines, SigToolGenericName,
 }
 
 // Config règle le détecteur.
@@ -257,6 +274,36 @@ func (r Result) Explain() string {
 	return fmt.Sprintf("score=%.1f%s [%s]%s", r.Score, eff, strings.Join(parts, ", "), tag)
 }
 
+// ExplainDetailed ajoute le détail de chaque signal — compteurs, pourcentages, nom du
+// FRAGMENT de notre propre liste qui a réagi. Aucun contenu de requête n'y figure : le
+// détail est produit par le détecteur, jamais recopié du client.
+//
+// Sert aux journaux d'exploitation : sans lui, un relevé dit « tool_suspicious a
+// réagi » sans permettre de savoir lequel des fragments est en cause, et il faut
+// reproduire l'incident pour trancher.
+func (r Result) ExplainDetailed() string {
+	if len(r.Signals) == 0 {
+		return r.Explain()
+	}
+	parts := make([]string, 0, len(r.Signals))
+	for _, s := range r.Signals {
+		mark := ""
+		if s.Ignored {
+			mark = "~"
+		}
+		if s.Detail == "" {
+			parts = append(parts, fmt.Sprintf("%s%s(%+.1f)", mark, s.Name, s.Weight))
+			continue
+		}
+		parts = append(parts, fmt.Sprintf("%s%s(%+.1f: %s)", mark, s.Name, s.Weight, s.Detail))
+	}
+	tag := ""
+	if r.Strong != "" {
+		tag = " fort=" + r.Strong
+	}
+	return fmt.Sprintf("score=%.1f effectif=%.1f [%s]%s", r.Score, r.EffectiveScore, strings.Join(parts, ", "), tag)
+}
+
 // Detector porte la configuration et l'état temporel.
 type Detector struct {
 	cfg           Config
@@ -382,18 +429,33 @@ func (d *Detector) AnalyzeAt(body []byte, clientKey string, now time.Time) Resul
 		add(SigMassRepetition, fmt.Sprintf("mot répété %.0f%% du texte (len=%d)", share*100, len(w)))
 	}
 
-	// 6) Motif de répétition structuré (lignes identiques, ou consigne chiffrée).
-	if n, _ := maxLineRepeat(user); n >= 15 {
-		add(SigRepetitionPattern, fmt.Sprintf("%d lignes identiques", n))
-	} else if n := repetitionInstruction(user); n >= 20 {
+	// 6) Motif de répétition structuré, en deux signaux DISTINCTS.
+	//
+	// La consigne chiffrée explicite (« répète le mot pomme 150 fois ») est une
+	// méthode de sondage précise : elle reste un signal FORT qui route seul. Quinze
+	// lignes identiques, en revanche, décrivent aussi bien un journal collé ou un
+	// tableau Markdown : mesuré en production sur du trafic client réel, c'est donc un
+	// signal CONDITIONNEL. Les confondre faisait router du travail ordinaire.
+	if n := repetitionInstruction(user); n >= 20 {
 		add(SigRepetitionPattern, fmt.Sprintf("consigne de %d répétitions", n))
+	}
+	if n, _ := maxLineRepeat(user); n >= 15 {
+		add(SigRepeatedLines, fmt.Sprintf("%d lignes identiques", n))
 	}
 
 	// 7) Outils : noms suspects (faible spécificité) et compte anormal.
 	tools := extractTools(raw)
 	if len(tools) > 0 {
+		// Deux niveaux : un nom d'outil qui DÉSIGNE une méthode d'empreinte
+		// (fingerprint, count_tokens, model_info…) est spécifique et route seul ; un
+		// nom qui contient « test », « probe », « detect », « ping » est banal dans du
+		// code réel (run_tests, probe_health) — mesuré en production — et n'est donc
+		// qu'un indice à corroborer.
 		if frag := suspiciousToolName(tools); frag != "" {
-			add(SigToolSuspicious, "nom d'outil suspect: "+frag)
+			add(SigToolSuspicious, "nom d'outil de sondage: "+frag)
+		}
+		if frag := genericToolName(tools); frag != "" {
+			add(SigToolGenericName, "nom d'outil banal: "+frag)
 		}
 		if hasEmptyTool(tools) {
 			add(SigToolSuspicious, "outil sans nom/description")

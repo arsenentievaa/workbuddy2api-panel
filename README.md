@@ -497,6 +497,47 @@ model=deepseek-v4.1-flash score=8.5
 `dry_run=true` 让这次观察没有产生任何账单。修复方式是**要求佐证**（见上）：两个信号
 被降为 +2.0 并列入 `corroboration_signals`，未获佐证即被剔除。
 
+### 第二波校准（2026-09-29，军备阶段 2 时）
+
+阶段 2 上线（dry_run=false、fp_route.enabled=true）后十分钟内，检测器在**真实客户
+流量**上触发了 61 次：全部来自同一个 agent，信号形态完全相同：
+
+```
+model=claude-opus-5-5 score=9.5
+  [recent_fact(+2.0), mass_repetition(+4.0), tool_suspicious(+4.0),
+   tool_count_extreme(+2.0), sse_shape(+1.5), coding_like(-4.0)]
+  （其中 29 条还带 repetition_pattern）
+```
+
+`coding_like` 惩罚在场说明这是编码工作，不是探测。三条「强」信号在真实流量上站不住：
+
+- **`mass_repetition`**：20 个相同字符（Markdown 分隔线 `|-----|`）或一个占 60% 以上的
+  词（粘贴的 JSON / 日志）——粘贴内容里极其常见。
+- **`tool_suspicious`**：片段表里有 `test`、`probe`、`detect`、`ping`、`fake`、`dummy`；
+  真实项目的工具叫 `run_tests`、`probe_health`、`detect_language`。代码注释早就写了这个
+  风险，生产把它证实了。
+- **`repetition_pattern` 的「≥15 行相同」分支**：粘贴的日志或表格就会命中。
+
+处理方式（与第一波同一条规则：**在真实流量上会误报的方法必须被佐证**）：
+
+1. `repetition_pattern` **拆分**为两个信号。**编号重复指令**（「把 apple 重复 150 次」）
+   是精确的探测手法，保持**强**信号、单独即可路由；**相同行 ≥15** 独立成
+   `repeated_lines`，条件性。
+2. `tool_suspicious` **拆分**为两个信号。指向指纹手法的名字（`fingerprint`、
+   `count_tokens`、`model_info`、`detect_model`…）保持独立信号；常见片段
+   （`test`/`probe`/`detect`/`ping`/`fake`/`dummy`）独立成 `tool_generic_name`。
+3. `mass_repetition`、`tool_suspicious`、`tool_generic_name`、`repeated_lines` 权重降为
+   **+2.0** 并进入 `corroboration_signals`。
+
+现在的条件性信号共六个：`pdf_content`、`tool_count_extreme`、`mass_repetition`、
+`tool_suspicious`、`tool_generic_name`、`repeated_lines`。仍然单独即可路由的是
+**真的精确**的方法：glitch token、身份提问、知识截止日期提问、编号重复指令、同一会话
+的重复请求。
+
+另外：探针日志改为输出**信号详情**（计数器、百分比、命中的**我们自己列表里的**片段名，
+绝不含客户内容）。没有它，日志只能说「tool_suspicious 触发了」，无法判断是哪个片段，
+只能复现事件才能定位。
+
 **修复后的生产 A/B 验证（2026-09-29，四条真实请求）**：
 
 ```

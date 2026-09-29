@@ -820,9 +820,19 @@ func TestFPObserveDefaults(t *testing.T) {
 	if len(c.FPObserve.Languages) != 17 {
 		t.Errorf("17 langues par défaut attendues, %d", len(c.FPObserve.Languages))
 	}
-	// Deux signaux conditionnels par défaut, et au moins 2 faibles requis.
-	if len(c.FPObserve.CorroborationSignals) != 2 {
-		t.Fatalf("2 signaux de corroboration attendus, %v", c.FPObserve.CorroborationSignals)
+	// Les signaux conditionnels par défaut : chacun vient d'une observation de
+	// production où une méthode générique a réagi à du trafic client légitime.
+	défaut := []string{
+		"pdf_content", "tool_count_extreme", "mass_repetition",
+		"tool_generic_name", "repeated_lines", "tool_suspicious",
+	}
+	if len(c.FPObserve.CorroborationSignals) != len(défaut) {
+		t.Fatalf("%d signaux de corroboration attendus, %v", len(défaut), c.FPObserve.CorroborationSignals)
+	}
+	for i, want := range défaut {
+		if c.FPObserve.CorroborationSignals[i] != want {
+			t.Fatalf("corroboration_signals par défaut: %v", c.FPObserve.CorroborationSignals)
+		}
 	}
 	if c.FPObserve.CorroborationWeakMin != 2 {
 		t.Errorf("corroboration_weak_min=%d want 2", c.FPObserve.CorroborationWeakMin)

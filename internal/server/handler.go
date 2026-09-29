@@ -570,7 +570,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		}
 		switch {
 		case fpResult.Route:
-			log.Printf("[fp] SONDE DÉTECTÉE model=%s %s", peek.Model, fpResult.Explain())
+			log.Printf("[fp] SONDE DÉTECTÉE model=%s %s", peek.Model, fpResult.ExplainDetailed())
 		case len(fpResult.IgnoredNames()) > 0:
 			// Trace explicite de ce que la corroboration évite : sans cette ligne, un
 			// signal conditionnel écarté serait invisible et le relevé laisserait croire

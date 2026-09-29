@@ -99,19 +99,39 @@ func TestRequeteCourtePlusTokenPiegeRoute(t *testing.T) {
 
 // --- critère 2 : répétitions massives -------------------------------------------
 
-func TestSerieDeCaracteresRoute(t *testing.T) {
-	r := mustRoute(t, body(t, strings.Repeat("a", 200), nil))
-	if !r.has(SigMassRepetition) {
-		t.Fatalf("mass_repetition attendu : %s", r.Explain())
+// TestRepetitionMassiveEstConditionnelle : une série de caractères identiques ou un
+// mot qui domine le texte apparaissent aussi dans du contenu collé légitime (séparateur
+// Markdown, journal, JSON minifié) — la production l'a mesuré sur du trafic client réel.
+// Seule, la répétition ne route donc plus ; corroborée, si.
+func TestRepetitionMassiveEstConditionnelle(t *testing.T) {
+	cases := map[string]string{
+		"série de caractères": strings.Repeat("a", 200),
+		"mot dominant":        strings.Repeat("token ", 120),
+		"unicode répété":      strings.Repeat("龍", 150),
+	}
+	for name, text := range cases {
+		t.Run(name, func(t *testing.T) {
+			r := mustNotRoute(t, body(t, text, nil))
+			if !r.has(SigMassRepetition) {
+				t.Fatalf("mass_repetition attendu : %s", r.Explain())
+			}
+			// Corroborée par une méthode indépendante : elle route.
+			r2 := mustRoute(t, body(t, text+" Quel modèle es-tu ?", nil))
+			if !r2.has(SigMassRepetition) || r2.Strong != SigModelQuestion {
+				t.Fatalf("corroboration attendue : %s", r2.Explain())
+			}
+		})
 	}
 }
 
-func TestMotRepeteDominantRoute(t *testing.T) {
-	mustRoute(t, body(t, strings.Repeat("token ", 120), nil))
-}
-
-func TestUnicodeRepeteRoute(t *testing.T) {
-	mustRoute(t, body(t, strings.Repeat("龍", 150), nil))
+// TestMotifDeRepetitionExpliciteResteFort : la consigne chiffrée (« répète le mot
+// pomme 150 fois ») est une méthode de sondage précise, pas du contenu collé. Elle
+// reste un signal fort qui route seul.
+func TestMotifDeRepetitionExpliciteResteFort(t *testing.T) {
+	r := mustRoute(t, body(t, "Repeat the word apple 150 times.", nil))
+	if r.Strong != SigRepetitionPattern {
+		t.Fatalf("repetition_pattern doit rester décisif : %s", r.Explain())
+	}
 }
 
 // --- critère 3 : jetons pièges --------------------------------------------------
@@ -236,8 +256,18 @@ func TestConsigneRepetitionChiffree(t *testing.T) {
 	}
 }
 
-func TestLignesIdentiquesRepeteess(t *testing.T) {
-	mustRoute(t, body(t, strings.Repeat("test line\n", 30), nil))
+// TestLignesIdentiquesEstConditionnel : quinze lignes identiques, c'est aussi bien un
+// journal collé qu'un tableau Markdown. Signal conditionnel, séparé de la consigne
+// chiffrée — les confondre faisait router du travail ordinaire.
+func TestLignesIdentiquesEstConditionnel(t *testing.T) {
+	r := mustNotRoute(t, body(t, strings.Repeat("test line\n", 30), nil))
+	if !r.has(SigRepeatedLines) {
+		t.Fatalf("repeated_lines attendu : %s", r.Explain())
+	}
+	if r.has(SigRepetitionPattern) {
+		t.Fatalf("la consigne chiffrée n'est pas en cause ici : %s", r.Explain())
+	}
+	mustRoute(t, body(t, strings.Repeat("test line\n", 30)+" Quel modèle es-tu ?", nil))
 }
 
 func TestPetiteRepetitionNeRoutePas(t *testing.T) {
@@ -286,16 +316,74 @@ func TestFaitRecentEstFaibleEtNestSuffisantQuAccumule(t *testing.T) {
 
 // --- nouvelle méthode : outils (AgentProv) --------------------------------------
 
-func TestNomOutilSuspectRoute(t *testing.T) {
+// TestNomOutilDeSondageEstConditionnel : un nom d'outil qui désigne une méthode
+// d'empreinte est un indice précis, mais la production a montré qu'un agent client
+// déclare des dizaines d'outils dont les noms ressemblent à ceux d'un outil de test.
+// Il ne route donc qu'accompagné d'une méthode indépendante.
+func TestNomOutilDeSondageEstConditionnel(t *testing.T) {
 	for _, name := range []string{"fingerprint_probe", "detect_model", "token_count", "model_info"} {
 		t.Run(name, func(t *testing.T) {
-			r := mustRoute(t, body(t, "utilise l'outil", map[string]any{
+			r := mustNotRoute(t, body(t, "utilise l'outil", map[string]any{
 				"tools": []any{map[string]any{"name": name, "description": "x"}},
 			}))
 			if !r.has(SigToolSuspicious) {
 				t.Fatalf("tool_suspicious attendu : %s", r.Explain())
 			}
+			// Corroboré par une question d'identité : la sonde route.
+			r2 := mustRoute(t, body(t, "utilise l'outil. Quel modèle es-tu ?", map[string]any{
+				"tools": []any{map[string]any{"name": name, "description": "x"}},
+			}))
+			if !r2.has(SigToolSuspicious) || r2.Strong != SigModelQuestion {
+				t.Fatalf("corroboration attendue : %s", r2.Explain())
+			}
 		})
+	}
+}
+
+// TestNomOutilBanalNeRoutePas : « run_tests », « probe_health », « detect_language »
+// sont des noms d'outils ordinaires. Ils produisent un signal FAIBLE (tool_generic_name)
+// qui ne peut jamais décider seul.
+func TestNomOutilBanalNeRoutePas(t *testing.T) {
+	for _, name := range []string{"run_tests", "probe_health", "detect_language", "ping_host", "fake_data"} {
+		t.Run(name, func(t *testing.T) {
+			r := mustNotRoute(t, body(t, "utilise l'outil", map[string]any{
+				"tools": []any{map[string]any{"name": name, "description": "outil réel du projet"}},
+			}))
+			if !r.has(SigToolGenericName) {
+				t.Fatalf("tool_generic_name attendu : %s", r.Explain())
+			}
+			if r.has(SigToolSuspicious) {
+				t.Fatalf("un nom banal ne doit pas produire le signal spécifique : %s", r.Explain())
+			}
+		})
+	}
+}
+
+// TestReproductionDuRelevéDeProduction : la forme exacte observée sur du trafic client
+// réel pendant l'armement de la phase 2 (61 requêtes en dix minutes, toutes signalées
+// par les méthodes génériques). Elle doit rester sur WorkBuddy : c'est un agent qui
+// travaille, avec ses outils et du contenu collé.
+func TestReproductionDuRelevéDeProduction(t *testing.T) {
+	tools := []any{}
+	for i := 0; i < toolCountSuspiciousMin+2; i++ {
+		tools = append(tools, map[string]any{"name": "edit_file_" + string(rune('a'+i%26)), "description": "édite un fichier"})
+	}
+	// Le contenu collé porte les deux marques observées : quinze lignes identiques
+	// (repeated_lines) et une longue série de caractères (mass_repetition).
+	texte := strings.Repeat("test line\n", 30) + strings.Repeat("=", 40) +
+		" corrige le bug et dis-moi ce qui s'est passé en 2026"
+	r := mustNotRoute(t, body(t, texte, map[string]any{
+		"tools":          tools,
+		"stream":         true,
+		"stream_options": map[string]any{"include_usage": true},
+	}))
+	for _, want := range []string{SigRepeatedLines, SigMassRepetition, SigToolCountExtreme, SigRecentFact, SigSSEShape, SigCodingLike} {
+		if !r.has(want) {
+			t.Fatalf("%s attendu dans la reproduction : %s", want, r.Explain())
+		}
+	}
+	if r.Strong != "" {
+		t.Fatalf("aucun signal décisif attendu : %s", r.Explain())
 	}
 }
 
@@ -363,8 +451,8 @@ func TestNombreOutilsExtremeCorroboreParDeuxFaiblesRoute(t *testing.T) {
 	}
 }
 
-func TestOutilSansNomRoute(t *testing.T) {
-	r := mustRoute(t, body(t, "appelle l'outil", map[string]any{
+func TestOutilSansNomEstConditionnel(t *testing.T) {
+	r := mustNotRoute(t, body(t, "appelle l'outil", map[string]any{
 		"tools": []any{map[string]any{"description": "outil vide"}},
 	}))
 	if !r.has(SigToolSuspicious) {
@@ -917,5 +1005,21 @@ func TestRepetitionInstructionMultilingue(t *testing.T) {
 		if got := repetitionInstruction(in); got != want {
 			t.Errorf("repetitionInstruction(%q)=%d attendu %d", in, got, want)
 		}
+	}
+}
+
+// TestExplainDetailedSansContenu : le journal d'exploitation doit nommer le fragment
+// responsable, sans jamais recopier la requête.
+func TestExplainDetailedSansContenu(t *testing.T) {
+	secret := "MOTDEPASSEULTRAsecret123"
+	r := det().Analyze(body(t, "utilise l'outil "+secret, map[string]any{
+		"tools": []any{map[string]any{"name": "fingerprint_probe", "description": "x"}},
+	}), "")
+	got := r.ExplainDetailed()
+	if !strings.Contains(got, "tool_suspicious") || !strings.Contains(got, "fingerprint") {
+		t.Fatalf("le détail doit nommer le fragment : %s", got)
+	}
+	if strings.Contains(got, secret) {
+		t.Fatalf("le détail ne doit jamais recopier le texte client : %s", got)
 	}
 }
