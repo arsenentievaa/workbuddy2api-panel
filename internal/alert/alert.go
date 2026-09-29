@@ -103,15 +103,29 @@ func (n *Notifier) loop(ctx context.Context) {
 	}
 }
 
-// Send met une alerte en file, en respectant la fenêtre de déduplication.
+// Send met une alerte en file, en respectant la fenêtre de déduplication globale.
 // Retourne false si l'alerte a été supprimée (doublon récent) ou perdue (file pleine).
 func (n *Notifier) Send(key, text string) bool {
+	return n.SendWindow(key, text, 0)
+}
+
+// SendWindow : comme Send, avec une fenêtre de déduplication propre à cette alerte.
+// window <= 0 => fenêtre globale.
+//
+// Nécessaire parce que toutes les alertes n'ont pas la même urgence : une fuite de
+// langue signalée sur une fenêtre de 15 minutes doit pouvoir se rappeler toutes les
+// 15 minutes tant qu'elle dure, sans pour autant raccourcir la fenêtre des autres
+// (une panne de fournisseur qui dure ne doit pas spammer).
+func (n *Notifier) SendWindow(key, text string, window time.Duration) bool {
 	if !n.Enabled() {
 		return false
 	}
+	if window <= 0 {
+		window = n.dedup
+	}
 	now := time.Now()
 	n.mu.Lock()
-	if last, ok := n.lastSent[key]; ok && now.Sub(last) < n.dedup {
+	if last, ok := n.lastSent[key]; ok && now.Sub(last) < window {
 		n.suppress++
 		n.mu.Unlock()
 		return false
@@ -201,6 +215,7 @@ const (
 	KeyGlobalCap    = "reroute_global_cap_reached"
 	KeyRerouteError = "reroute_error"
 	KeyRerouteRate  = "reroute_rate_high"
+	KeyLanguageLeak = "language_leak"
 )
 
 // LoadFromEnv lit les identifiants Telegram depuis l'environnement. Les noms

@@ -1174,10 +1174,19 @@ type FPCounters struct {
 	// CJK). C'est la mesure de la fuite : chaque unité est une réponse qui a trahi le
 	// backend auprès du client.
 	MismatchDetected int64
-	// MismatchRerouted / MismatchKept : ce qu'on en a fait. La différence est le
-	// résidu de fuite réellement subi par les clients.
+	// MismatchRerouted / MismatchKept : ce qu'on en a fait. `kept` est le résidu de
+	// fuite réellement subi par les clients : réponse incohérente servie parce que le
+	// reroutage a échoué OU a été refusé (plafond, upstream malsain).
 	MismatchRerouted int64
 	MismatchKept     int64
+	// mismatchKeptAt : horodatages des fuites, pour la fenêtre glissante de l'alerte.
+	// Borné (pruned à chaque écriture) : un incident prolongé ne doit pas faire croître
+	// la mémoire du compteur.
+	mismatchKeptAt []time.Time
+	// leakWindow : fenêtre de surveillance des fuites, PARTAGÉE avec l'alerte pour que
+	// /status montre exactement ce que l'alerte évalue — deux fenêtres distinctes
+	// finiraient par diverger et l'exploitant ne saurait plus quoi interpréter.
+	leakWindow time.Duration
 
 	// IdentitySources : nombre de quotas consommés par ORIGINE de la clé (client /
 	// conv / auth / key). C'est le seul moyen de constater depuis /status que l'en-tête
@@ -1194,7 +1203,7 @@ const fpCapMaxClients = 4096
 
 // NewFPCounters construit le compteur avec son plafond horaire (<=0 : plafond par
 // défaut), l'état dry-run et la règle de corroboration affichés par /status.
-func NewFPCounters(capPerHour int, dryRun bool, corroborationSignals []string, corroborationWeakMin int, globalCapPerHour int) *FPCounters {
+func NewFPCounters(capPerHour int, dryRun bool, corroborationSignals []string, corroborationWeakMin int, globalCapPerHour int, leakWindow time.Duration) *FPCounters {
 	if capPerHour <= 0 {
 		capPerHour = 20
 	}
@@ -1203,6 +1212,9 @@ func NewFPCounters(capPerHour int, dryRun bool, corroborationSignals []string, c
 	}
 	if corroborationWeakMin < 1 {
 		corroborationWeakMin = 2
+	}
+	if leakWindow <= 0 {
+		leakWindow = 15 * time.Minute
 	}
 	return &FPCounters{
 		BySignal:             map[string]int64{},
@@ -1216,6 +1228,7 @@ func NewFPCounters(capPerHour int, dryRun bool, corroborationSignals []string, c
 		CappedClient:         map[string]bool{},
 		reroutedKeys:         map[string]struct{}{},
 		identitySources:      map[string]int64{},
+		leakWindow:           leakWindow,
 	}
 }
 
@@ -1314,10 +1327,55 @@ func (c *FPCounters) NoteMismatchRerouted() {
 	c.mu.Unlock()
 }
 
-func (c *FPCounters) NoteMismatchKept() {
+// NoteMismatchKept enregistre une fuite subie avec son horodatage (fenêtre d'alerte).
+func (c *FPCounters) NoteMismatchKept(now time.Time) {
 	c.mu.Lock()
+	defer c.mu.Unlock()
 	c.MismatchKept++
-	c.mu.Unlock()
+	c.mismatchKeptAt = append(c.mismatchKeptAt, now)
+	// Borne dure : on ne conserve jamais plus de fpKeptMaxEntries horodatages, même si
+	// l'horloge recule ou si l'incident dure des heures.
+	if len(c.mismatchKeptAt) > fpKeptMaxEntries {
+		c.mismatchKeptAt = append([]time.Time(nil), c.mismatchKeptAt[len(c.mismatchKeptAt)-fpKeptMaxEntries:]...)
+	}
+}
+
+// fpKeptMaxEntries / fpKeptRetain : bornes de la fenêtre glissante des fuites.
+const (
+	fpKeptMaxEntries = 512
+	fpKeptRetain     = time.Hour
+)
+
+// MismatchKeptInWindow : nombre de fuites survenues dans les `window` dernières
+// minutes. Fenêtre GLISSANTE (pas un compteur cumulatif) : c'est ce que demande
+// l'alerte, sinon un incident ancien déclencherait indéfiniment.
+func (c *FPCounters) MismatchKeptInWindow(now time.Time) int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.mismatchKeptInWindowLocked(now)
+}
+
+// LanguageLeakWindow : fenêtre de surveillance (celle de l'alerte).
+func (c *FPCounters) LanguageLeakWindow() time.Duration { return c.leakWindow }
+
+// mismatchKeptInWindowLocked : cœur sans verrou, appelable depuis Snapshot qui tient
+// déjà le verrou. Un sync.Mutex n'est PAS réentrant : passer par la méthode publique
+// depuis Snapshot bloquerait définitivement chaque lecture de /status.
+func (c *FPCounters) mismatchKeptInWindowLocked(now time.Time) int {
+	window := c.leakWindow
+	if window <= 0 {
+		return 0
+	}
+	cut := now.Add(-window)
+	kept := pruneTimes(c.mismatchKeptAt, cut)
+	c.mismatchKeptAt = kept
+	n := 0
+	for _, t := range kept {
+		if !t.Before(cut) {
+			n++
+		}
+	}
+	return n
 }
 
 // NoteRerouteOK / NoteRerouteFailure / NoteHealthBlocked : compteurs d'exécution.
@@ -1444,6 +1502,12 @@ func (c *FPCounters) Snapshot() map[string]any {
 			"detected": c.MismatchDetected,
 			"rerouted": c.MismatchRerouted,
 			"kept":     c.MismatchKept,
+		},
+		// Fenêtre glissante : c'est ce que surveille l'alerte, donc c'est ainsi qu'on
+		// vérifie depuis /status ce qu'elle voit.
+		"language_leak": map[string]any{
+			"window_seconds": int(c.leakWindow.Seconds()),
+			"kept_in_window": c.mismatchKeptInWindowLocked(time.Now()),
 		},
 	}
 }

@@ -113,6 +113,7 @@
     "max_per_hour_per_token": 20,
     "max_per_hour_total": 100,
     "client_id_header": "X-Client-Id",
+    "language_leak_window_seconds": 900,
     "rate_alert_percent": 5,
     "rate_alert_min_sample": 50
   },

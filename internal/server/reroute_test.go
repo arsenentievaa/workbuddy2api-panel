@@ -79,7 +79,7 @@ const sseExternal = "data: {\"id\":\"msg_x\",\"object\":\"chat.completion.chunk\
 
 func newRerouter(t *testing.T, ext *fakeExternal, dryRun bool, capPerHour, globalCap int, notifier bool) (*Rerouter, *FPCounters) {
 	t.Helper()
-	stats := NewFPCounters(capPerHour, dryRun, fpdetect.DefaultConfig().CorroborationSignals, 2, globalCap)
+	stats := NewFPCounters(capPerHour, dryRun, fpdetect.DefaultConfig().CorroborationSignals, 2, globalCap, 15*time.Minute)
 	rr := &Rerouter{
 		Enabled:          true,
 		DryRun:           dryRun,
@@ -609,7 +609,7 @@ func TestIdentityBorneeEtNettoyee(t *testing.T) {
 // TestSourceDIdentiteComptee : /status doit permettre de constater que l'isolation par
 // client est réellement alimentée, et pas seulement configurée.
 func TestSourceDIdentiteComptee(t *testing.T) {
-	c := NewFPCounters(20, true, nil, 2, 100)
+	c := NewFPCounters(20, true, nil, 2, 100, 15*time.Minute)
 	now := time.Now()
 	c.AllowReroute("client:u42", now)
 	c.AllowReroute("client:u42", now)

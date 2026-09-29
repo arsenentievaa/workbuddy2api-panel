@@ -124,3 +124,29 @@ func TestLoadFromEnv(t *testing.T) {
 		t.Fatalf("repli sur le nom générique attendu, obtenu %q", tok)
 	}
 }
+
+// TestSendWindowDedupParAlerte : chaque alerte peut avoir sa propre fenêtre de
+// déduplication. Une fuite signalée sur 15 minutes doit pouvoir se rappeler toutes les
+// 15 minutes tant qu'elle dure, sans raccourcir la fenêtre des autres alertes.
+func TestSendWindowDedupParAlerte(t *testing.T) {
+	n := New("jeton", "canal")
+	n.dedup = time.Hour
+
+	if !n.SendWindow("fuite", "première", 15*time.Minute) {
+		t.Fatal("la première alerte doit partir")
+	}
+	if n.SendWindow("fuite", "répétition immédiate", 15*time.Minute) {
+		t.Fatal("une répétition dans la fenêtre doit être supprimée")
+	}
+	// Une autre clé avec la fenêtre globale reste indépendante.
+	if !n.SendWindow("autre", "autre alerte", 0) {
+		t.Fatal("une clé différente doit passer")
+	}
+	// Fenêtre nulle => fenêtre globale (1 h) : la répétition est supprimée.
+	if n.SendWindow("autre", "répétition", 0) {
+		t.Fatal("la fenêtre globale doit s'appliquer quand window <= 0")
+	}
+	if s := n.Stats(); s.Suppressed != 2 {
+		t.Fatalf("compteur de suppressions : %+v", s)
+	}
+}

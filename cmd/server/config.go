@@ -242,6 +242,11 @@ type Config struct {
 		// {"x-client-id": "{client_id}"}). Vide = pas d'isolation par client, repli sur
 		// la conversation puis sur l'empreinte de l'autorisation.
 		ClientIDHeader string `json:"client_id_header"` // défaut "X-Client-Id"
+		// LanguageLeakWindowSeconds : fenêtre glissante de l'alerte « fuite de langue ».
+		// Une réponse incohérente servie au client parce que le reroutage a échoué ou a
+		// été refusé est une fuite subie : l'alerte se déclenche dès qu'il y en a une
+		// dans la fenêtre, et se répète au plus une fois par fenêtre tant que ça dure.
+		LanguageLeakWindowSeconds int `json:"language_leak_window_seconds"` // défaut 900
 		// RateAlertPercent / RateAlertMinSample : surveillance du taux de reroutage.
 		RateAlertPercent   float64 `json:"rate_alert_percent"`    // défaut 5
 		RateAlertMinSample int64   `json:"rate_alert_min_sample"` // défaut 50
@@ -358,6 +363,7 @@ func Default() *Config {
 	c.FPRoute.MaxPerHourPerToken = 20
 	c.FPRoute.MaxPerHourTotal = 100
 	c.FPRoute.ClientIDHeader = "X-Client-Id"
+	c.FPRoute.LanguageLeakWindowSeconds = 900
 	c.FPRoute.RateAlertPercent = 5
 	c.FPRoute.RateAlertMinSample = 50
 	c.SessionSticky.Enabled = true
@@ -665,6 +671,9 @@ func (c *Config) normalize() error {
 	// est une configuration légitime (désactiver l'isolation par client), on ne la
 	// remplace donc pas par la valeur par défaut.
 	c.FPRoute.ClientIDHeader = strings.TrimSpace(c.FPRoute.ClientIDHeader)
+	if c.FPRoute.LanguageLeakWindowSeconds <= 0 {
+		c.FPRoute.LanguageLeakWindowSeconds = 900
+	}
 	if c.FPRoute.RateAlertPercent <= 0 {
 		c.FPRoute.RateAlertPercent = 5
 	}

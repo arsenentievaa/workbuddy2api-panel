@@ -30,7 +30,7 @@ func quietResult() fpdetect.Result {
 }
 
 func TestFPCountersEnregistreEtExpose(t *testing.T) {
-	c := NewFPCounters(20, true, nil, 2, 100)
+	c := NewFPCounters(20, true, nil, 2, 100, 15*time.Minute)
 	now := time.Now()
 	c.Record("cli-1", routeResult(), now)
 	c.Record("cli-1", quietResult(), now)
@@ -55,7 +55,7 @@ func TestFPCountersEnregistreEtExpose(t *testing.T) {
 // mesuré dans Record). Les 20 premières demandes passent, la 21e est refusée, et un
 // autre client n'est pas affecté.
 func TestPlafondHoraireParClient(t *testing.T) {
-	c := NewFPCounters(20, true, nil, 2, 100)
+	c := NewFPCounters(20, true, nil, 2, 100, 15*time.Minute)
 	now := time.Now()
 	for i := 0; i < 20; i++ {
 		if ok, reason := c.AllowReroute("cli-1", now); !ok {
@@ -83,7 +83,7 @@ func TestPlafondHoraireParClient(t *testing.T) {
 // seul garde-fou qui résiste à la dégénérescence de l'isolation (une même clé de
 // données pour tous les clients derrière NewAPI).
 func TestPlafondGlobal(t *testing.T) {
-	c := NewFPCounters(100, true, nil, 2, 3)
+	c := NewFPCounters(100, true, nil, 2, 3, 15*time.Minute)
 	now := time.Now()
 	for i := 0; i < 3; i++ {
 		if ok, reason := c.AllowReroute("cli-"+string(rune('a'+i)), now); !ok {
@@ -101,7 +101,7 @@ func TestPlafondGlobal(t *testing.T) {
 
 // TestPlafondFenetreGlissante : le quota se libère au bout d'une heure.
 func TestPlafondFenetreGlissante(t *testing.T) {
-	c := NewFPCounters(2, true, nil, 2, 100)
+	c := NewFPCounters(2, true, nil, 2, 100, 15*time.Minute)
 	now := time.Now()
 	c.AllowReroute("cli-1", now)
 	c.AllowReroute("cli-1", now)
@@ -117,7 +117,7 @@ func TestPlafondFenetreGlissante(t *testing.T) {
 // inapplicable. On laisse passer sous la protection du plafond global et on le compte,
 // plutôt que de refuser des clients légitimes pour une limite qu'on ne sait pas mesurer.
 func TestPlafondNonAttribuable(t *testing.T) {
-	c := NewFPCounters(1, true, nil, 2, 100)
+	c := NewFPCounters(1, true, nil, 2, 100, 15*time.Minute)
 	now := time.Now()
 	for i := 0; i < 5; i++ {
 		if ok, reason := c.AllowReroute("", now); !ok {
@@ -132,7 +132,7 @@ func TestPlafondNonAttribuable(t *testing.T) {
 
 // TestPlafondMemoireBornee : la table des clients ne grossit pas sans limite.
 func TestPlafondMemoireBornee(t *testing.T) {
-	c := NewFPCounters(20, true, nil, 2, 1000000)
+	c := NewFPCounters(20, true, nil, 2, 1000000, 15*time.Minute)
 	now := time.Now()
 	for i := 0; i < fpCapMaxClients+200; i++ {
 		c.AllowReroute("cli-"+time.Duration(i).String(), now)
@@ -149,7 +149,7 @@ func TestPlafondMemoireBornee(t *testing.T) {
 // plafond sont deux choses distinctes. Une sonde détectée mais jamais reroutée (parce
 // que le reroutage est désactivé) ne doit pas consommer de quota.
 func TestRecordNeConsommePlusDeQuota(t *testing.T) {
-	c := NewFPCounters(2, true, nil, 2, 100)
+	c := NewFPCounters(2, true, nil, 2, 100, 15*time.Minute)
 	now := time.Now()
 	for i := 0; i < 50; i++ {
 		c.Record("cli-1", routeResult(), now)
@@ -189,7 +189,7 @@ func TestObservationFailOpen(t *testing.T) {
 		return 200, sseOK, true
 	})
 	p := testPoolWith(&auth.Auth{UID: "u1", AccessToken: "at1", ExpiresAt: 9999999999})
-	counters := NewFPCounters(20, true, nil, 2, 100)
+	counters := NewFPCounters(20, true, nil, 2, 100, 15*time.Minute)
 	h := NewHandler(Config{Pool: p, Upstream: up, FPDetect: fpdetect.New(fpdetect.DefaultConfig()), FPStats: counters})
 
 	rec := httptest.NewRecorder()
@@ -217,7 +217,7 @@ func TestObservationFailOpen(t *testing.T) {
 func TestSignauxIgnoresSontJournalises(t *testing.T) {
 	up := newFakeUpstream(t, func(authz string) (int, string, bool) { return 200, sseOK, true })
 	p := testPoolWith(&auth.Auth{UID: "u1", AccessToken: "at1", ExpiresAt: 9999999999})
-	counters := NewFPCounters(20, true, fpdetect.DefaultConfig().CorroborationSignals, 2, 100)
+	counters := NewFPCounters(20, true, fpdetect.DefaultConfig().CorroborationSignals, 2, 100, 15*time.Minute)
 	h := NewHandler(Config{Pool: p, Upstream: up, FPDetect: fpdetect.New(fpdetect.DefaultConfig()), FPStats: counters})
 
 	// PDF joint seul : signal conditionnel, non corroboré.
@@ -251,7 +251,7 @@ func TestObservationPasseLeTraficNormalIntact(t *testing.T) {
 		return 200, sseOK, true
 	})
 	p := testPoolWith(&auth.Auth{UID: "u1", AccessToken: "at1", ExpiresAt: 9999999999})
-	counters := NewFPCounters(20, true, nil, 2, 100)
+	counters := NewFPCounters(20, true, nil, 2, 100, 15*time.Minute)
 	h := NewHandler(Config{Pool: p, Upstream: up, FPDetect: fpdetect.New(fpdetect.DefaultConfig()), FPStats: counters})
 
 	body, _ := json.Marshal(map[string]any{
@@ -305,7 +305,7 @@ func TestObservationActiveDansStatus(t *testing.T) {
 		Upstream: upstream.New(),
 		Live:     livecfg.New(livecfg.Snapshot{APIKey: dataKey, AdminAPIKey: adminKey}),
 		FPDetect: fpdetect.New(fpdetect.DefaultConfig()),
-		FPStats:  NewFPCounters(7, true, []string{fpdetect.SigPDFContent}, 3, 100),
+		FPStats:  NewFPCounters(7, true, []string{fpdetect.SigPDFContent}, 3, 100, 15*time.Minute),
 	})
 	rec := get(h, "/status", adminKey)
 	var out map[string]any
@@ -335,7 +335,7 @@ func TestObservationActiveDansStatus(t *testing.T) {
 
 // TestSignauxIgnoresComptes : la mesure directe de ce que la corroboration évite.
 func TestSignauxIgnoresComptes(t *testing.T) {
-	c := NewFPCounters(20, true, []string{fpdetect.SigPDFContent, fpdetect.SigToolCountExtreme}, 2, 100)
+	c := NewFPCounters(20, true, []string{fpdetect.SigPDFContent, fpdetect.SigToolCountExtreme}, 2, 100, 15*time.Minute)
 	now := time.Now()
 	ignored := fpdetect.Result{
 		Score: 2, EffectiveScore: 0,
@@ -358,7 +358,7 @@ func TestSignauxIgnoresComptes(t *testing.T) {
 // TestObservationConcurrente vérifie qu'il n'y a pas de course sur les compteurs
 // (le chemin de requête est concurrent par nature).
 func TestObservationConcurrente(t *testing.T) {
-	c := NewFPCounters(1000000, true, nil, 2, 100)
+	c := NewFPCounters(1000000, true, nil, 2, 100, 15*time.Minute)
 	now := time.Now()
 	var wg sync.WaitGroup
 	for i := 0; i < 32; i++ {

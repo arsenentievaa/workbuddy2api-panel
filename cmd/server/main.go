@@ -300,7 +300,8 @@ func main() {
 		fpDet = fpdetect.New(fpCfg)
 		fpCounters = server.NewFPCounters(cfg.FPObserve.MaxReroutesPerHour, cfg.FPObserve.DryRun,
 			cfg.FPObserve.CorroborationSignals, cfg.FPObserve.CorroborationWeakMin,
-			cfg.FPRoute.MaxPerHourTotal)
+			cfg.FPRoute.MaxPerHourTotal,
+			time.Duration(cfg.FPRoute.LanguageLeakWindowSeconds)*time.Second)
 		// Les langues déclarées sont journalisées : c'est la trace vérifiable de la
 		// couverture annoncée, et le panneau relit la valeur dans /status.
 		labels := make([]string, 0, len(cfg.FPObserve.Languages))
@@ -374,10 +375,11 @@ func main() {
 			if isolation == "" {
 				isolation = "(en-tête client désactivé : repli conversation)"
 			}
-			log.Printf("fp_route: activé [%s] base=%s chemin=%s modèle=%s santé=%s/%ds plafond=%d/h/client et %d/h total isolation=%s alertes_telegram=%v",
+			log.Printf("fp_route: activé [%s] base=%s chemin=%s modèle=%s santé=%s/%ds plafond=%d/h/client et %d/h total isolation=%s alerte_fuite_langue=%ds alertes_telegram=%v",
 				state, cfg.FPRoute.BaseURL, cfg.FPRoute.Path, cfg.FPRoute.Model,
 				cfg.FPRoute.HealthPath, cfg.FPRoute.HealthTTLSeconds,
-				cfg.FPRoute.MaxPerHourPerToken, cfg.FPRoute.MaxPerHourTotal, isolation, notifier.Enabled())
+				cfg.FPRoute.MaxPerHourPerToken, cfg.FPRoute.MaxPerHourTotal, isolation,
+				cfg.FPRoute.LanguageLeakWindowSeconds, notifier.Enabled())
 		}
 	} else if fpDet != nil {
 		log.Printf("fp_route: désactivé (observation seule)")
@@ -429,6 +431,10 @@ func main() {
 					// l'alerte part dès la bascule détectée.
 					rerouter.Probe(ctx)
 					rerouter.EvaluateRate()
+					// Fuite de langue : surveillance sur fenêtre glissante. Le battement
+					// est à la minute, donc l'alerte part au plus une minute après la
+					// première réponse incohérente servie.
+					rerouter.EvaluateLanguageLeak(time.Now())
 				}
 			}
 		}()

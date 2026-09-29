@@ -3,12 +3,14 @@ package server
 import (
 	"bufio"
 	"bytes"
+	"fmt"
 	"io"
 	"log"
 	"net/http"
 	"strings"
 	"time"
 
+	"github.com/linguo2625469/workbuddy2api-panel/internal/alert"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/fpdetect"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/prompt"
 )
@@ -120,10 +122,18 @@ func (h *Handler) rerouteOnMismatch(w http.ResponseWriter, r *http.Request, body
 	if rr == nil || !rr.Enabled || rr.DryRun {
 		return false
 	}
+	now := time.Now()
 	key := rerouteIdentity(r, body, rr.ClientIDHeader)
-	allowed, reason := rr.Decide(r.Context(), key, time.Now())
+	allowed, reason := rr.Decide(r.Context(), key, now)
 	if !allowed {
-		log.Printf("[fp] désaccord de langue : reroutage refusé (%s) -> réponse d'origine conservée", reason)
+		// Refus (plafond atteint, upstream malsain) : le client garde bel et bien la
+		// réponse incohérente. C'est une fuite subie, donc elle compte au même titre
+		// qu'un échec d'appel — sinon l'alerte « kept > 0 » raterait précisément les
+		// pannes de fournisseur et les plafonds, c'est-à-dire les cas les plus probables.
+		if h.cfg.FPStats != nil {
+			h.cfg.FPStats.NoteMismatchKept(now)
+		}
+		log.Printf("[fp] désaccord de langue : reroutage refusé (%s) -> FUITE SUBIE par le client", reason)
 		return false
 	}
 	st.route = "crazy"
@@ -142,10 +152,10 @@ func (h *Handler) rerouteOnMismatch(w http.ResponseWriter, r *http.Request, body
 	// Elle est incohérente, mais c'est ce que le client serait de toute façon destiné à
 	// recevoir en cas de panne — et le signal reste compté et journalisé.
 	if h.cfg.FPStats != nil {
-		h.cfg.FPStats.NoteMismatchKept()
+		h.cfg.FPStats.NoteMismatchKept(now)
 	}
 	st.route = ""
-	log.Printf("[fp] désaccord de langue : reroutage impossible -> réponse d'origine servie (signal conservé)")
+	log.Printf("[fp] désaccord de langue : reroutage impossible -> FUITE SUBIE par le client (réponse d'origine servie)")
 	return false
 }
 
@@ -199,4 +209,45 @@ func completionText(resp map[string]any) string {
 		}
 	}
 	return b.String()
+}
+
+// EvaluateLanguageLeak surveille la fuite de langue sur une fenêtre GLISSANTE.
+//
+// Objet : `kept` compte les réponses incohérentes qui ont été servies au client alors
+// que le reroutage devait les remplacer — parce qu'il a échoué (transport, réponse
+// illisible, flux déjà ouvert) OU parce qu'il a été refusé (plafond anti-abus atteint,
+// upstream externe malsain). Dans tous ces cas le client subit la fuite : c'est
+// exactement ce qu'il faut savoir tout de suite, parce que le remède dépend de la cause
+// (rétablir le fournisseur, relever un plafond, corriger la configuration).
+//
+// Appelée périodiquement (jamais sur le chemin de requête). Retourne true si une alerte
+// a été émise, ce qui rend la décision testable sans réseau.
+func (rr *Rerouter) EvaluateLanguageLeak(now time.Time) bool {
+	if rr == nil || rr.Stats == nil || rr.Alerts == nil {
+		return false
+	}
+	window := rr.Stats.LanguageLeakWindow()
+	n := rr.Stats.MismatchKeptInWindow(now)
+	if n <= 0 {
+		return false
+	}
+	sante := "inconnue"
+	if h := rr.Health.Snapshot(); h.Measured {
+		if h.Healthy {
+			sante = "saine"
+		} else {
+			sante = "MALSAINE (" + h.LastError + ")"
+		}
+	}
+	total, rerouted := rr.Stats.RateCounters()
+	// La fenêtre de déduplication est celle de la surveillance : tant que la fuite
+	// dure, on le rappelle à chaque fenêtre, plutôt que de laisser l'incident se
+	// prolonger derrière une alerte déjà envoyée il y a longtemps.
+	return rr.Alerts.SendWindow(alert.KeyLanguageLeak, fmt.Sprintf(
+		"🔴 FUITE DE LANGUE : %d réponse(s) incohérente(s) servie(s) au client sur les %d dernières minutes "+
+			"(question sans caractère chinois, réponse en chinois qui a atteint le client). "+
+			"Le reroutage devait la remplacer : il a échoué ou a été refusé. "+
+			"Upstream externe : %s. %d reroutage(s) réussis au total sur %d requêtes analysées. "+
+			"À vérifier : santé du fournisseur, plafond anti-abus, /status (fp_observe.language_leak).",
+		n, int(window.Minutes()), sante, rerouted, total), window)
 }

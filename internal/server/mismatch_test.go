@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/linguo2625469/workbuddy2api-panel/internal/alert"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/auth"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/fpdetect"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/upstream"
@@ -63,7 +64,7 @@ func mismatchHandler(t *testing.T, ext *fakeExternal, upstreamBody string) (*Han
 		return 200, upstreamBody, true
 	})
 	p := testPoolWith(&auth.Auth{UID: "u1", AccessToken: "at1", ExpiresAt: 9999999999})
-	stats := NewFPCounters(20, false, fpdetect.DefaultConfig().CorroborationSignals, 2, 100)
+	stats := NewFPCounters(20, false, fpdetect.DefaultConfig().CorroborationSignals, 2, 100, 15*time.Minute)
 	rr := &Rerouter{
 		Enabled:        true,
 		DryRun:         false,
@@ -76,6 +77,7 @@ func mismatchHandler(t *testing.T, ext *fakeExternal, upstreamBody string) (*Han
 		Upstream:       &upstream.Client{},
 		Health:         upstream.NewExternalHealth(time.Minute),
 		Stats:          stats,
+		Alerts:         alert.New("jeton-de-test", "canal-de-test"),
 	}
 	h := NewHandler(Config{
 		Pool: p, Upstream: up,
@@ -333,5 +335,114 @@ func TestReroutageSondeNormaleSansConsigneDeLangue(t *testing.T) {
 	sent := ext.last.Load().(string)
 	if strings.Contains(sent, "same language as the user's last message") {
 		t.Fatalf("la consigne ne doit pas s'appliquer au reroutage des sondes de requête : %s", sent[:300])
+	}
+}
+
+// --- alerte « fuite de langue » --------------------------------------------------
+
+// TestAlerteFuiteDeLangue : l'alerte se déclenche dès qu'une réponse incohérente a été
+// servie au client dans la fenêtre, et se répète au plus une fois par fenêtre.
+func TestAlerteFuiteDeLangue(t *testing.T) {
+	ext := newFakeExternal(t, nil)
+	h, _ := mismatchHandler(t, ext, sseWithContent(zhAnswer))
+	rr := h.cfg.Rerouter
+
+	// Sans aucune fuite : silence.
+	if rr.EvaluateLanguageLeak(time.Now()) {
+		t.Fatal("aucune alerte attendue sans fuite")
+	}
+
+	// Une réponse incohérente servie (l'upstream externe est en panne) → une fuite.
+	extDown := newFakeExternal(t, func(w http.ResponseWriter, r *http.Request, body string) {
+		w.WriteHeader(http.StatusInternalServerError)
+	})
+	h2, _ := mismatchHandler(t, extDown, sseWithContent(zhAnswer))
+	rr2 := h2.cfg.Rerouter
+	postJSONClient(h2, "/v1/chat/completions", clientBody(t, enQuestion, false), "u42")
+	if lm := mismatchCounters(h2); lm["kept"] != 1 {
+		t.Fatalf("une fuite attendue : %v", lm)
+	}
+	if !rr2.EvaluateLanguageLeak(time.Now()) {
+		t.Fatal("l'alerte doit partir dès qu'une fuite existe dans la fenêtre")
+	}
+	// Deuxième évaluation immédiate : supprimée par la fenêtre de déduplication.
+	if rr2.EvaluateLanguageLeak(time.Now()) {
+		t.Fatal("l'alerte ne doit pas être répétée dans la même fenêtre")
+	}
+	if s := rr2.Alerts.Stats(); s.Suppressed == 0 {
+		t.Fatalf("la répétition doit être comptée comme supprimée : %+v", s)
+	}
+}
+
+// TestFuiteDeLangueRefuseeCompte : un reroutage REFUSÉ (plafond atteint) est aussi une
+// fuite subie par le client — sinon l'alerte raterait les cas les plus probables
+// (plafond, fournisseur malsain).
+func TestFuiteDeLangueRefuseeCompte(t *testing.T) {
+	ext := newFakeExternal(t, nil)
+	h, _ := mismatchHandler(t, ext, sseWithContent(zhAnswer))
+	rr := h.cfg.Rerouter
+	// Plafond global à 0 : aucun reroutage autorisé.
+	rr.Stats = NewFPCounters(20, false, nil, 2, 1, 15*time.Minute)
+	// Une unité déjà consommée par un autre client sature le plafond global.
+	rr.Stats.AllowReroute("autre", time.Now())
+
+	rec := postJSONClient(h, "/v1/chat/completions", clientBody(t, enQuestion, false), "u42")
+	if !strings.Contains(rec.Body.String(), "巴黎") {
+		t.Fatalf("la réponse incohérente doit être servie (reroutage refusé) : %s", rec.Body.String()[:200])
+	}
+	lm := mismatchCounters(h)
+	if lm["kept"] != 1 || lm["rerouted"] != 0 {
+		t.Fatalf("un refus de plafond doit compter comme fuite subie : %v", lm)
+	}
+	if n := ext.callCount(); n != 0 {
+		t.Fatalf("aucun appel externe attendu (plafond) : %d", n)
+	}
+}
+
+// TestFenetreFuiteGlissante : la fenêtre est glissante. Une fuite ancienne ne doit plus
+// compter (sinon l'alerte se déclencherait indéfiniment après un incident terminé), et
+// ce que /status expose doit être exactement ce que l'alerte évalue.
+func TestFenetreFuiteGlissante(t *testing.T) {
+	stats := NewFPCounters(20, false, nil, 2, 100, 15*time.Minute)
+	now := time.Now()
+	if stats.MismatchKeptInWindow(now) != 0 {
+		t.Fatal("aucune fuite au départ")
+	}
+	// Une fuite il y a 20 minutes : hors fenêtre de 15.
+	stats.NoteMismatchKept(now.Add(-20 * time.Minute))
+	if n := stats.MismatchKeptInWindow(now); n != 0 {
+		t.Fatalf("une fuite de 20 min ne doit pas compter dans 15 min : %d", n)
+	}
+	// Une fuite récente : dans la fenêtre.
+	stats.NoteMismatchKept(now.Add(-5 * time.Minute))
+	if n := stats.MismatchKeptInWindow(now); n != 1 {
+		t.Fatalf("une fuite de 5 min doit compter : %d", n)
+	}
+	// /status doit exposer la même fenêtre et le même compte.
+	if w := stats.LanguageLeakWindow(); w != 15*time.Minute {
+		t.Fatalf("fenêtre exposée : %v", w)
+	}
+	snap := stats.Snapshot()["language_leak"].(map[string]any)
+	if snap["window_seconds"] != 900 || snap["kept_in_window"] != 1 {
+		t.Fatalf("bloc language_leak : %v", snap)
+	}
+}
+
+// TestFuiteDeLangueBornageMemoire : une fuite prolongée ne doit pas faire croître la
+// mémoire du compteur sans limite.
+func TestFuiteDeLangueBornageMemoire(t *testing.T) {
+	stats := NewFPCounters(20, false, nil, 2, 100, 15*time.Minute)
+	now := time.Now()
+	for i := 0; i < fpKeptMaxEntries+200; i++ {
+		stats.NoteMismatchKept(now)
+	}
+	stats.mu.Lock()
+	n := len(stats.mismatchKeptAt)
+	stats.mu.Unlock()
+	if n > fpKeptMaxEntries {
+		t.Fatalf("horodatages non bornés : %d", n)
+	}
+	if got := stats.MismatchKeptInWindow(now); got > fpKeptMaxEntries {
+		t.Fatalf("compte fenêtré incohérent : %d", got)
 	}
 }
