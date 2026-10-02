@@ -1188,6 +1188,30 @@ type FPCounters struct {
 	// finiraient par diverger et l'exploitant ne saurait plus quoi interpréter.
 	leakWindow time.Duration
 
+	// --- budget PROPRE au remède des fuites de langue ---------------------------
+	//
+	// Le plafond anti-abus des sondes et le remède à une fuite de langue ne bornent
+	// pas la même chose : le premier borne une DÉPENSE (des sondes qui pourraient se
+	// multiplier), le second répare une réponse FAUSSE déjà produite et déjà facturée
+	// au client. Les faire partager un seul quota revenait à laisser un client très
+	// actif consommer, par ses sondes, le droit de recevoir une réponse correcte :
+	// mesuré le 2026-10-02, `language_mismatch{detected:4, kept:4, rerouted:0}` —
+	// quatre réponses chinoises servies à des clients, aucune remplacée, alors que le
+	// plafond des sondes, lui, était saturé (over_cap 15 108).
+	//
+	// Le budget reste borné (le remède coûte un appel réel au fournisseur) mais il est
+	// INDÉPENDANT : un client ne peut plus perdre son droit à une réponse correcte
+	// parce qu'il a épuisé son quota de sondes.
+	leakBudgetClient  int
+	leakBudgetTotal   int
+	leakWindowsClient map[string][]time.Time
+	leakWindowGlobal  []time.Time
+	// LeakOverCap / LeakCapBlocked : remèdes refusés faute de budget DÉDIÉ. Distincts
+	// de OverCap/CapBlocked (sondes) : un exploitant doit pouvoir lire lequel des deux
+	// plafonds a mordu.
+	LeakOverCap    int64
+	LeakCapBlocked int64
+
 	// IdentitySources : nombre de quotas consommés par ORIGINE de la clé (client /
 	// conv / auth / key). C'est le seul moyen de constater depuis /status que l'en-tête
 	// d'identité client arrive vraiment — sans ce compteur, une isolation par client
@@ -1200,6 +1224,15 @@ const fpCapWindow = time.Hour
 
 // fpCapMaxClients borne la mémoire du compteur (même esprit que fpdetect.State).
 const fpCapMaxClients = 4096
+
+// Budget par défaut du remède aux fuites de langue. Volontairement modeste : chaque
+// remède est un appel réel au fournisseur externe, donc facturé. Il n'a pas besoin
+// d'être grand — mesuré le 2026-10-02 : 4 fuites détectées en tout, alors que le
+// plafond des sondes, lui, refusait 15 108 requêtes sur la même période.
+const (
+	defaultLeakCapPerClient = 5
+	defaultLeakCapTotal     = 30
+)
 
 // NewFPCounters construit le compteur avec son plafond horaire (<=0 : plafond par
 // défaut), l'état dry-run et la règle de corroboration affichés par /status.
@@ -1229,8 +1262,36 @@ func NewFPCounters(capPerHour int, dryRun bool, corroborationSignals []string, c
 		reroutedKeys:         map[string]struct{}{},
 		identitySources:      map[string]int64{},
 		leakWindow:           leakWindow,
+		leakBudgetClient:     defaultLeakCapPerClient,
+		leakBudgetTotal:      defaultLeakCapTotal,
+		leakWindowsClient:    map[string][]time.Time{},
 	}
 }
+
+// SetLeakCaps : budget horaire du remède aux fuites de langue (0 = défaut). Appelé
+// par le câblage de configuration ; les valeurs par défaut s'appliquent sans lui, pour
+// qu'un déploiement qui ne configure rien obtienne quand même un remède fonctionnel.
+func (c *FPCounters) SetLeakCaps(perClient, total int) {
+	if c == nil {
+		return
+	}
+	if perClient <= 0 {
+		perClient = defaultLeakCapPerClient
+	}
+	if total <= 0 {
+		total = defaultLeakCapTotal
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.leakBudgetClient, c.leakBudgetTotal = perClient, total
+	if c.leakWindowsClient == nil {
+		c.leakWindowsClient = map[string][]time.Time{}
+	}
+}
+
+// LeakCapPerClient / LeakCapTotal : réglages courants, pour /status et le journal.
+func (c *FPCounters) LeakCapPerClient() int { return c.leakBudgetClient }
+func (c *FPCounters) LeakCapTotal() int     { return c.leakBudgetTotal }
 
 // CapPerHour / GlobalCapPerHour : réglages courants, pour les messages d'alerte.
 func (c *FPCounters) CapPerHour() int       { return c.capPerHour }
@@ -1288,6 +1349,59 @@ func (c *FPCounters) AllowReroute(key string, now time.Time) (bool, string) {
 	}
 	if c.identitySources != nil {
 		c.identitySources[identitySource(key)]++
+	}
+	return true, ""
+}
+
+// AllowLeakReroute arbitre le budget DÉDIÉ au remède d'une fuite de langue et consomme
+// le créneau quand il autorise.
+//
+// Indépendant de AllowReroute à dessein : les sondes et le remède à une réponse fausse
+// ne mesurent pas la même chose (voir le commentaire des champs leakBudget*). La forme
+// est la même — plafond global puis plafond par client, fenêtre d'une heure — pour que
+// le comportement reste prévisible et borné.
+func (c *FPCounters) AllowLeakReroute(key string, now time.Time) (bool, string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	perClient, total := c.leakBudgetClient, c.leakBudgetTotal
+	if perClient <= 0 {
+		perClient = defaultLeakCapPerClient
+	}
+	if total <= 0 {
+		total = defaultLeakCapTotal
+	}
+	cut := now.Add(-fpCapWindow)
+	c.leakWindowGlobal = pruneTimes(append(c.leakWindowGlobal, now), cut)
+	if len(c.leakWindowGlobal) > total {
+		c.LeakOverCap++
+		c.LeakCapBlocked++
+		return false, reasonCapGlobal
+	}
+	if key == "" {
+		return true, ""
+	}
+	if c.leakWindowsClient == nil {
+		c.leakWindowsClient = map[string][]time.Time{}
+	}
+	if len(c.leakWindowsClient) >= fpCapMaxClients {
+		for k, ts := range c.leakWindowsClient {
+			if len(pruneTimes(ts, cut)) == 0 {
+				delete(c.leakWindowsClient, k)
+			}
+		}
+	}
+	w := pruneTimes(c.leakWindowsClient[key], cut)
+	w = append(w, now)
+	c.leakWindowsClient[key] = w
+	if len(w) > perClient {
+		c.LeakOverCap++
+		c.LeakCapBlocked++
+		// Le refus ne doit pas consommer le créneau global : cette requête n'a pas
+		// été remplacée.
+		if n := len(c.leakWindowGlobal); n > 0 {
+			c.leakWindowGlobal = c.leakWindowGlobal[:n-1]
+		}
+		return false, reasonCapClient
 	}
 	return true, ""
 }
@@ -1502,6 +1616,14 @@ func (c *FPCounters) Snapshot() map[string]any {
 			"detected": c.MismatchDetected,
 			"rerouted": c.MismatchRerouted,
 			"kept":     c.MismatchKept,
+		},
+		// Budget DÉDIÉ au remède des fuites de langue : un exploitant doit pouvoir lire
+		// lequel des deux plafonds a mordu (sondes ou remède).
+		"leak_budget": map[string]int64{
+			"per_hour_per_client": int64(c.LeakCapPerClient()),
+			"per_hour_total":      int64(c.LeakCapTotal()),
+			"over_cap":            c.LeakOverCap,
+			"blocked":             c.LeakCapBlocked,
 		},
 		// Fenêtre glissante : c'est ce que surveille l'alerte, donc c'est ainsi qu'on
 		// vérifie depuis /status ce qu'elle voit.

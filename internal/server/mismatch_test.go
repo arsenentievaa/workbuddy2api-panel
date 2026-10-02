@@ -374,28 +374,55 @@ func TestAlerteFuiteDeLangue(t *testing.T) {
 	}
 }
 
-// TestFuiteDeLangueRefuseeCompte : un reroutage REFUSÉ (plafond atteint) est aussi une
-// fuite subie par le client — sinon l'alerte raterait les cas les plus probables
-// (plafond, fournisseur malsain).
+// TestFuiteDeLangueRerouteMalgrePlafondSondes : le plafond anti-abus des SONDES ne doit
+// PAS priver un client du remède à une réponse fausse. C'est la règle corrigée le
+// 2026-10-02 : `language_mismatch{detected:4, kept:4, rerouted:0}` alors que le plafond
+// des sondes, partagé, était saturé (over_cap 15 108) — quatre réponses chinoises
+// servies à des clients faute d'un budget propre au remède.
+func TestFuiteDeLangueRerouteMalgrePlafondSondes(t *testing.T) {
+	ext := newFakeExternal(t, nil)
+	h, _ := mismatchHandler(t, ext, sseWithContent(zhAnswer))
+	rr := h.cfg.Rerouter
+	// Plafond GLOBAL des sondes saturé (1, déjà consommé par un autre client).
+	rr.Stats = NewFPCounters(20, false, nil, 2, 1, 15*time.Minute)
+	rr.Stats.AllowReroute("autre", time.Now())
+
+	rec := postJSONClient(h, "/v1/chat/completions", clientBody(t, enQuestion, false), "u42")
+	if strings.Contains(rec.Body.String(), "巴黎") {
+		t.Fatalf("une réponse chinoise ne doit plus passer : le remède est indépendant des sondes : %s", rec.Body.String()[:200])
+	}
+	if n := ext.callCount(); n != 1 {
+		t.Fatalf("l'upstream externe doit être appelé une fois malgré le plafond de sondes : %d", n)
+	}
+	lm := mismatchCounters(h)
+	if lm["rerouted"] != 1 || lm["kept"] != 0 {
+		t.Fatalf("le remède doit avoir eu lieu : %v", lm)
+	}
+}
+
+// TestFuiteDeLangueRefuseeCompte : quand le budget DÉDIÉ au remède est lui-même épuisé,
+// la fuite est subie par le client — et elle doit être comptée et journalisée comme
+// telle, sinon l'alerte raterait précisément les cas les plus probables (plafond,
+// fournisseur malsain).
 func TestFuiteDeLangueRefuseeCompte(t *testing.T) {
 	ext := newFakeExternal(t, nil)
 	h, _ := mismatchHandler(t, ext, sseWithContent(zhAnswer))
 	rr := h.cfg.Rerouter
-	// Plafond global à 0 : aucun reroutage autorisé.
-	rr.Stats = NewFPCounters(20, false, nil, 2, 1, 15*time.Minute)
-	// Une unité déjà consommée par un autre client sature le plafond global.
-	rr.Stats.AllowReroute("autre", time.Now())
+	// Budget dédié au remède : un seul créneau, déjà consommé.
+	rr.Stats = NewFPCounters(20, false, nil, 2, 100, 15*time.Minute)
+	rr.Stats.SetLeakCaps(1, 1)
+	rr.Stats.AllowLeakReroute("autre", time.Now())
 
 	rec := postJSONClient(h, "/v1/chat/completions", clientBody(t, enQuestion, false), "u42")
 	if !strings.Contains(rec.Body.String(), "巴黎") {
-		t.Fatalf("la réponse incohérente doit être servie (reroutage refusé) : %s", rec.Body.String()[:200])
+		t.Fatalf("la réponse incohérente doit être servie (remède refusé) : %s", rec.Body.String()[:200])
 	}
 	lm := mismatchCounters(h)
 	if lm["kept"] != 1 || lm["rerouted"] != 0 {
-		t.Fatalf("un refus de plafond doit compter comme fuite subie : %v", lm)
+		t.Fatalf("un refus de budget doit compter comme fuite subie : %v", lm)
 	}
 	if n := ext.callCount(); n != 0 {
-		t.Fatalf("aucun appel externe attendu (plafond) : %d", n)
+		t.Fatalf("aucun appel externe attendu (budget épuisé) : %d", n)
 	}
 }
 

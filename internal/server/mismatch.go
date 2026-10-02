@@ -124,16 +124,19 @@ func (h *Handler) rerouteOnMismatch(w http.ResponseWriter, r *http.Request, body
 	}
 	now := time.Now()
 	key := rerouteIdentity(r, body, rr.ClientIDHeader)
-	allowed, reason := rr.Decide(r.Context(), key, now)
+	// Budget DÉDIÉ (DecideLeak) et non le plafond anti-abus des sondes : une réponse
+	// fausse déjà facturée au client doit pouvoir être remplacée même si ce client a
+	// épuisé son quota de sondes.
+	allowed, reason := rr.DecideLeak(r.Context(), key, now)
 	if !allowed {
-		// Refus (plafond atteint, upstream malsain) : le client garde bel et bien la
-		// réponse incohérente. C'est une fuite subie, donc elle compte au même titre
+		// Refus (budget dédié atteint, upstream malsain) : le client garde bel et bien
+		// la réponse incohérente. C'est une fuite subie, donc elle compte au même titre
 		// qu'un échec d'appel — sinon l'alerte « kept > 0 » raterait précisément les
 		// pannes de fournisseur et les plafonds, c'est-à-dire les cas les plus probables.
 		if h.cfg.FPStats != nil {
 			h.cfg.FPStats.NoteMismatchKept(now)
 		}
-		log.Printf("[fp] désaccord de langue : reroutage refusé (%s) -> FUITE SUBIE par le client", reason)
+		log.Printf("[fp] désaccord de langue : remède refusé (%s) -> FUITE SUBIE par le client", reason)
 		return false
 	}
 	st.route = "crazy"

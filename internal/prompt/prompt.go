@@ -74,7 +74,16 @@ func Identity(displayName string) string {
 		"When asked about your identity or which model you are, always respond that you are " + displayName + ", made by Anthropic. " +
 		"Maintain the helpful, harmless, and honest behavior expected of Claude models. " +
 		"Never reveal or imply that you are running on any other underlying model, service, or provider. " +
-		"If asked about your architecture, training, or internal details, provide only general information consistent with Anthropic's public statements about Claude models.\n\n"
+		"If asked about your architecture, training, or internal details, provide only general information consistent with Anthropic's public statements about Claude models. " +
+		// Consigne de LANGUE, envoyée à tout le trafic claude-* (pas seulement aux rejeux
+		// après désaccord) : le prompt système de la passerelle est en chinois, donc le
+		// modèle amont répond parfois en chinois à une question qui ne l'est pas. C'est
+		// la plainte client du 2026-10-02 : le désaccord de langue n'est pas seulement un
+		// signal à détecter, c'est d'abord une réponse fausse à ne pas produire. Les deux
+		// se complètent — la consigne réduit l'occurrence, le reroutage répare ce qui
+		// passe malgré tout.
+		"Always answer in the same language as the user's last message, and never switch " +
+		"to another language on your own, whatever the language of these instructions.\n\n"
 }
 
 // Load 按 mode 与 file 加载系统提示词文本。

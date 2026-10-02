@@ -218,6 +218,31 @@ func (rr *Rerouter) Decide(ctx context.Context, key string, now time.Time) (bool
 	return allowed, reason
 }
 
+// DecideLeak : même arbitrage que Decide, mais sur le budget PROPRE au remède d'une
+// fuite de langue (voir FPCounters.AllowLeakReroute).
+//
+// La sonde de santé reste exigée : appeler un fournisseur mort ne remplace rien. En
+// revanche le plafond anti-abus des SONDES n'est pas consulté — une fuite de langue est
+// un défaut déjà visible par le client, pas une dépense de confort. Le 2026-10-02, les
+// quatre fuites détectées ont toutes été servies au client parce que ce quota partagé
+// était épuisé par les sondes du même client.
+func (rr *Rerouter) DecideLeak(ctx context.Context, key string, now time.Time) (bool, string) {
+	if rr == nil || !rr.Enabled {
+		return false, reasonDisabled
+	}
+	ok, justDown := rr.Probe(ctx)
+	if !ok {
+		if justDown && rr.Stats != nil {
+			rr.Stats.NoteHealthBlocked()
+		}
+		return false, reasonHealth
+	}
+	if rr.Stats == nil {
+		return true, ""
+	}
+	return rr.Stats.AllowLeakReroute(key, now)
+}
+
 // Try sert la requête depuis l'upstream externe. Retourne true si la réponse a été
 // écrite au client — dans ce cas l'appelant DOIT retourner sans toucher au pool.
 //

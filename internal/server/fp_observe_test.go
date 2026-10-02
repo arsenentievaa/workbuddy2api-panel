@@ -375,3 +375,63 @@ func TestObservationConcurrente(t *testing.T) {
 		t.Fatalf("analyses perdues : %v", s)
 	}
 }
+
+// TestBudgetFuiteLangueIndependantDesSondes : le remède à une fuite de langue a son
+// PROPRE budget. Motif mesuré le 2026-10-02 : `language_mismatch{detected:4, kept:4,
+// rerouted:0}` — quatre réponses chinoises servies à des clients parce que le plafond
+// des sondes, partagé, était saturé par les sondes des mêmes clients. Un client qui a
+// épuisé son quota de sondes doit quand même pouvoir faire remplacer une réponse fausse.
+func TestBudgetFuiteLangueIndependantDesSondes(t *testing.T) {
+	c := NewFPCounters(2, false, nil, 2, 100, 15*time.Minute) // plafond sondes : 2/h/client
+	now := time.Now()
+	for i := 0; i < 2; i++ {
+		if ok, _ := c.AllowReroute("cli-1", now); !ok {
+			t.Fatalf("sonde %d refusée alors que le plafond n'est pas atteint", i+1)
+		}
+	}
+	if ok, _ := c.AllowReroute("cli-1", now); ok {
+		t.Fatal("la 3e sonde devait être refusée (plafond de sondes atteint)")
+	}
+	// Le remède à une fuite reste possible : budget distinct.
+	if ok, reason := c.AllowLeakReroute("cli-1", now); !ok {
+		t.Fatalf("le remède à une fuite doit rester possible malgré le plafond de sondes épuisé (refus: %s)", reason)
+	}
+	// Et il est lui-même borné (défaut 5/h/client) : au 5e créneau, refus.
+	for i := 0; i < 4; i++ {
+		if ok, reason := c.AllowLeakReroute("cli-1", now); !ok {
+			t.Fatalf("remède %d refusé alors que le budget dédié n'est pas atteint (refus: %s)", i+2, reason)
+		}
+	}
+	if ok, reason := c.AllowLeakReroute("cli-1", now); ok || reason != reasonCapClient {
+		t.Fatalf("le 6e remède devait être refusé par le budget dédié (ok=%v raison=%s)", ok, reason)
+	}
+	// Le refus par client ne doit pas avoir consommé le créneau global du budget dédié.
+	if ok, _ := c.AllowLeakReroute("cli-2", now); !ok {
+		t.Fatal("un autre client doit garder son budget dédié intact")
+	}
+	s := c.Snapshot()
+	lb := s["leak_budget"].(map[string]int64)
+	if lb["per_hour_per_client"] != 5 || lb["per_hour_total"] != 30 {
+		t.Fatalf("budget dédié absent du snapshot : %v", s["leak_budget"])
+	}
+	if lb["blocked"] != 1 || lb["over_cap"] != 1 {
+		t.Fatalf("compteurs du budget dédié inattendus : %v", lb)
+	}
+}
+
+// TestBudgetFuiteLangueGlobal : le budget dédié est globalement borné lui aussi (chaque
+// remède est un appel facturé chez le fournisseur externe).
+func TestBudgetFuiteLangueGlobal(t *testing.T) {
+	c := NewFPCounters(20, false, nil, 2, 100, 15*time.Minute)
+	c.SetLeakCaps(3, 4) // 4 remèdes/heure au total, tous clients confondus
+	now := time.Now()
+	ok := 0
+	for i := 0; i < 6; i++ {
+		if allowed, _ := c.AllowLeakReroute("cli-"+time.Duration(i).String(), now); allowed {
+			ok++
+		}
+	}
+	if ok != 4 {
+		t.Fatalf("remèdes autorisés = %d, want 4 (plafond global du budget dédié)", ok)
+	}
+}

@@ -302,6 +302,9 @@ func main() {
 			cfg.FPObserve.CorroborationSignals, cfg.FPObserve.CorroborationWeakMin,
 			cfg.FPRoute.MaxPerHourTotal,
 			time.Duration(cfg.FPRoute.LanguageLeakWindowSeconds)*time.Second)
+		// Budget DÉDIÉ au remède des fuites de langue : sans lui, un client qui a épuisé
+		// son quota de sondes ne peut plus faire remplacer une réponse chinoise.
+		fpCounters.SetLeakCaps(cfg.FPRoute.MaxLeakPerHourClient, cfg.FPRoute.MaxLeakPerHourTotal)
 		// Les langues déclarées sont journalisées : c'est la trace vérifiable de la
 		// couverture annoncée, et le panneau relit la valeur dans /status.
 		labels := make([]string, 0, len(cfg.FPObserve.Languages))
@@ -375,11 +378,12 @@ func main() {
 			if isolation == "" {
 				isolation = "(en-tête client désactivé : repli conversation)"
 			}
-			log.Printf("fp_route: activé [%s] base=%s chemin=%s modèle=%s santé=%s/%ds plafond=%d/h/client et %d/h total isolation=%s alerte_fuite_langue=%ds alertes_telegram=%v",
+			log.Printf("fp_route: activé [%s] base=%s chemin=%s modèle=%s santé=%s/%ds plafond=%d/h/client et %d/h total isolation=%s alerte_fuite_langue=%ds remede_fuite=%d/h/client et %d/h total alertes_telegram=%v",
 				state, cfg.FPRoute.BaseURL, cfg.FPRoute.Path, cfg.FPRoute.Model,
 				cfg.FPRoute.HealthPath, cfg.FPRoute.HealthTTLSeconds,
 				cfg.FPRoute.MaxPerHourPerToken, cfg.FPRoute.MaxPerHourTotal, isolation,
-				cfg.FPRoute.LanguageLeakWindowSeconds, notifier.Enabled())
+				cfg.FPRoute.LanguageLeakWindowSeconds,
+				cfg.FPRoute.MaxLeakPerHourClient, cfg.FPRoute.MaxLeakPerHourTotal, notifier.Enabled())
 		}
 	} else if fpDet != nil {
 		log.Printf("fp_route: désactivé (observation seule)")

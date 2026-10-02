@@ -237,6 +237,15 @@ type Config struct {
 		// MaxPerHourTotal : plafond global, seul garde-fou qui résiste à la
 		// dégénérescence de l'isolation par client.
 		MaxPerHourTotal int `json:"max_per_hour_total"` // défaut 100
+		// MaxLeakPerHourClient / MaxLeakPerHourTotal : budget du remède aux fuites de
+		// langue (une question sans caractère chinois à laquelle le modèle répond en
+		// chinois). INDÉPENDANT des plafonds de sondes ci-dessus : un client qui a épuisé
+		// son quota de sondes doit quand même pouvoir recevoir une réponse correcte.
+		// Défauts modestes (5/h/client, 30/h au total) : chaque remède est un appel réel
+		// au fournisseur externe, donc facturé — or 4 fuites seulement avaient été
+		// détectées au 2026-10-02.
+		MaxLeakPerHourClient int `json:"max_leak_per_hour_client"` // défaut 5
+		MaxLeakPerHourTotal  int `json:"max_leak_per_hour_total"`  // défaut 30
 		// ClientIDHeader : nom de l'en-tête qui porte l'identité du client final,
 		// injecté par la passerelle amont (NewAPI : header_override
 		// {"x-client-id": "{client_id}"}). Vide = pas d'isolation par client, repli sur
@@ -362,6 +371,8 @@ func Default() *Config {
 	c.FPRoute.TimeoutSeconds = 60
 	c.FPRoute.MaxPerHourPerToken = 20
 	c.FPRoute.MaxPerHourTotal = 100
+	c.FPRoute.MaxLeakPerHourClient = 5
+	c.FPRoute.MaxLeakPerHourTotal = 30
 	c.FPRoute.ClientIDHeader = "X-Client-Id"
 	c.FPRoute.LanguageLeakWindowSeconds = 900
 	c.FPRoute.RateAlertPercent = 5
@@ -666,6 +677,14 @@ func (c *Config) normalize() error {
 	}
 	if c.FPRoute.MaxPerHourTotal <= 0 {
 		c.FPRoute.MaxPerHourTotal = 100
+	}
+	// Budget du remède aux fuites de langue : indépendant des plafonds de sondes, mais
+	// borné lui aussi (chaque remède est un appel facturé).
+	if c.FPRoute.MaxLeakPerHourClient <= 0 {
+		c.FPRoute.MaxLeakPerHourClient = 5
+	}
+	if c.FPRoute.MaxLeakPerHourTotal <= 0 {
+		c.FPRoute.MaxLeakPerHourTotal = 30
 	}
 	// Le nom de l'en-tête n'est normalisé qu'en espaces : un en-tête explicitement vide
 	// est une configuration légitime (désactiver l'isolation par client), on ne la

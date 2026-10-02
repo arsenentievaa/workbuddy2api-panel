@@ -46,3 +46,18 @@ func TestIdentityEmptyFallsBackToClaude(t *testing.T) {
 		t.Errorf("empty display name should fall back to Claude, got: %s", got)
 	}
 }
+
+// TestIdentityConsigneDeLangue : la consigne de langue part avec TOUT le trafic claude-*.
+// Le prompt système de la passerelle est en chinois : sans cette consigne explicite, le
+// modèle amont répond parfois en chinois à une question qui ne l'est pas — c'est la
+// plainte client du 2026-10-02. Vérifier ici que la consigne est bien présente (et en
+// anglais : c'est une instruction, pas un gabarit de client CLI).
+func TestIdentityConsigneDeLangue(t *testing.T) {
+	got := Identity("Claude Opus 5")
+	if !strings.Contains(got, "same language as the user's last message") {
+		t.Errorf("Identity doit porter la consigne de langue, obtenu: %s", got)
+	}
+	if !strings.Contains(got, "never switch to another language") {
+		t.Errorf("Identity doit interdire le changement de langue, obtenu: %s", got)
+	}
+}
