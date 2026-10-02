@@ -36,10 +36,36 @@ import "strings"
 // un signal qui route à lui seul.
 var modelIdentityPhrases = []string{
 	// --- Anglais ---
+	"are you actually claude",
 	"are you claude",
 	"are you gpt",
+	"are you really claude",
+	"are you a real claude",
 	"identify yourself",
 	"what ai are you",
+	// Ajouts du 2026-10-02 : « Which AI model are you exactly? Which company
+	// trained you? » n'a été détecté par AUCUN motif — la question d'identité la plus
+	// ordinaire en anglais passait donc au parc, alors qu'elle doit partir chez le
+	// fournisseur externe. Aucune de ces formes ne décrit une question légitime sur un
+	// produit : elles portent toutes sur l'IDENTITÉ du modèle qui répond.
+	"what ai model are you",
+	"what company trained you",
+	"what model do you use",
+	"what model are you using",
+	"what model is answering",
+	"what's your model",
+	"whats your model",
+	"which ai are you",
+	"which ai model are you",
+	"which company developed you",
+	"which company trained you",
+	"which company is behind you",
+	"which lab made you",
+	"which lab trained you",
+	"which model are you using",
+	"which model is answering",
+	"who is your creator",
+	"who is your developer",
 	"what llm",
 	"what model are you",
 	"what model are you running",

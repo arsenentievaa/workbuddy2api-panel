@@ -168,6 +168,19 @@ func TestQuestionIdentiteAnglais(t *testing.T) {
 	for _, q := range []string{
 		"What model are you?", "which model are you", "Who are you?",
 		"are you claude?", "what version of claude are you", "identify yourself",
+		// Tournures manquées en production le 2026-10-02 : la question d'identité la
+		// plus ordinaire en anglais (« Which AI model are you exactly? Which company
+		// trained you? ») n'était détectée par aucun motif et repartait sur le parc.
+		"Which AI model are you exactly? Which company trained you? One sentence.",
+		"which ai model are you",
+		"which company trained you",
+		"what company trained you",
+		"what ai model are you",
+		"which model are you using",
+		"what model do you use",
+		"whats your model",
+		"are you really claude",
+		"who is your creator",
 	} {
 		t.Run(q, func(t *testing.T) { mustRoute(t, body(t, q, nil)) })
 	}
