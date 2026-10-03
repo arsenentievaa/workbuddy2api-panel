@@ -503,6 +503,12 @@ func (d *Detector) AnalyzeAt(body []byte, clientKey string, now time.Time) Resul
 		add(SigModelQuestion, "question explicite sur l'identité")
 	} else if loose != "" && len([]rune(user)) <= looseIdentityMaxRunes {
 		add(SigModelQuestion, "forme brève « quel modèle »")
+	} else if ok, why := structuralIdentityQuestion(user); ok {
+		// Règle structurelle, toutes langues : 2e personne + mot d'identité (ou
+		// interrogatif) dans une question courte. Elle rattrape les tournures que la
+		// liste de phrases ne connaît pas — c'est elle qui rend la détection tenable
+		// pour des développeurs du monde entier. Voir identity_structural.go.
+		add(SigModelQuestion, "question d'identité (structurelle) : "+why)
 	}
 
 	// 3) Question explicite sur la date de coupure de connaissance.
