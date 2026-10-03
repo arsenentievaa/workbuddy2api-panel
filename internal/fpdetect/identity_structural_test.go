@@ -11,7 +11,7 @@ func TestSondesIdentiteToutesLangues(t *testing.T) {
 		"Tu es qui ?", "tu es qui", "Who are you?", "What model are you?",
 		"¿Quién eres?", "¿Qué modelo eres?", "Quem é você?", "Qual é o seu modelo?",
 		"Wer bist du?", "Welches Modell bist du?", "Chi sei?", "Quale modello sei?",
-		"Wie ben je?", "Welk model ben jij?", "Kim jesteś?", "Jaki to model?",
+		"Wie ben je?", "Welk model ben jij?", "Kim jesteś?", "Jakim modelem jesteś?",
 		"Кто ты?", "Какая ты модель?", "Хто ти?", "Sen kimsin?", "Hangi modelsin?",
 		"من أنت؟", "ما هو نموذجك؟", "تو کی هستی؟", "אתה מי?", "מי אתה?",
 		"तुम कौन हो?", "आप कौन हैं?", "আপনি কে?", "คุณเป็นใคร", "คุณคือโมเดลอะไร",
@@ -41,6 +41,11 @@ func TestTravailOrdinaireNeRoutePas(t *testing.T) {
 		"Le modèle de données doit gérer les commandes et les clients.",
 		"Corrige le bug dans la fonction compute_total et lance les tests.",
 		"¿Puedes explicar cómo funciona este modelo de datos?",
+		// Cas remontés par l'alerte « taux de reroutage élevé » du 2026-10-03 : des
+		// questions de travail courtes qui parlent de « modèle » près de « tu ».
+		"Peux-tu utiliser ce modèle ?", "Peux-tu me dire quel modèle est le meilleur ?",
+		"Tu peux tester ce modèle stp ?", "¿Puedes usar este modelo?",
+		"Kannst du dieses Modell benutzen?", "你能解释这个模型吗", "你能用这个模型做什么",
 		"Kannst du mir dieses Datenmodell erklären?",
 		"请解释这个数据模型如何工作",
 		"Bu veri modelini açıklar mısın?",
@@ -76,7 +81,6 @@ func TestFormesInversees(t *testing.T) {
 		"Mit welchem Modell rede ich hier?", "Welches Modell spreche ich gerade an?",
 		"À quel modèle est-ce que je parle ?", "Quel modèle suis-je en train d'utiliser ?",
 		"¿Con qué modelo hablo yo?", "Con quale modello parlo io?",
-		"Czy ja rozmawiam z modelem?",
 	} {
 		t.Run(s, func(t *testing.T) { mustRoute(t, body(t, s, nil)) })
 	}

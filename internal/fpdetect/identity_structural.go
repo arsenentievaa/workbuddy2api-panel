@@ -36,27 +36,49 @@ import (
 const (
 	// identityMaxRunes : au-delà, c'est un prompt de travail, pas une sonde.
 	identityMaxRunes = 160
-	// identityProximity : écart maximal, en mots, entre la 2e personne et le terme
-	// d'identité ou l'interrogatif.
-	identityProximity = 3
+	// Trois paliers de proximité, parce que tous les mots d'identité ne se valent pas :
+	//
+	//   - « modèle » est un mot de TRAVAIL (« ce modèle de données », « quel modèle
+	//     choisir ») : il ne compte que COLLÉ à la 2e personne (« tu es quel modèle »,
+	//     « ¿qué modelo eres? »). Mesuré le 2026-10-03 : avec un écart de 3 mots, le
+	//     détecteur partait sur 8 % du trafic et le compte CrazyToken se vidait ;
+	//   - une marque ou un terme sans ambiguïté (« claude », « llm », « version »,
+	//     « éditeur », « entraînement ») tolère un petit écart : on parle bien de
+	//     l'assistant ;
+	//   - un interrogatif nu (« qui », « who », « 谁 ») reste serré lui aussi.
+	weakIdentityProximity   = 2
+	strongIdentityProximity = 3
+	interrogativeProximity  = 2
 	// cjkProximity : écart maximal en CARACTÈRES pour les écritures sans espaces
 	// (« 你是谁 », « あなたは誰 ») — élargie car les signes diacritiques du thaï et du
 	// bengali consomment des caractères à eux seuls.
 	cjkProximity = 8
+	// cjkWeakProximity : fenêtre du mot « modèle » en écriture sans espaces : il doit
+	// être collé à la 2e personne (« 你是什么模型 »), pas seulement présent.
+	cjkWeakProximity = 3
 )
+
+// cjkCopulas : le verbe « être » des écritures sans espaces. Il est INDISPENSABLE au
+// palier faible : « 你是什么模型 » (tu es quel modèle) est une sonde, « 你能解释这个模型吗 »
+// (peux-tu expliquer ce modèle) ne l'est pas — la seule différence est ce verbe.
+var cjkCopulas = []string{
+	"是", "係", "が", "です", "だ", "である", "でござ", "이다", "이야", "입니다", "야",
+	"เป็น", "คือ",
+}
 
 // selfRefForms : pronoms et formes verbales de 2e personne — le client parle À
 // l'assistant. Les formes trop ambiguës d'une autre langue sont écartées : « je »
 // (1re personne en français, 2e en néerlandais), « te » (clitique très fréquent),
 // « is/are » seuls (une question sur des objets, pas sur l'assistant).
-var selfRefForms = []string{
+// selfPronounForms : pronoms de 2e personne — le client parle À l'assistant.
+var selfPronounForms = []string{
 	// --- pronoms ---
 	// anglais
 	"you", "yourself", "yourselves", "youre", "u",
 	// français
 	"tu", "toi", "vous", "votre", "vos",
 	// espagnol / portugais
-	"usted", "ustedes", "vosotros", "vos", "ti", "contigo", "voce", "voces", "vc",
+	"usted", "ustedes", "vosotros", "vos", "ti", "contigo", "voce", "voces", "vc", "você",
 	"senhor", "senhora",
 	// allemand / néerlandais
 	"du", "dich", "dir", "ihr", "euch", "jij", "jou", "uw", "jullie",
@@ -78,11 +100,16 @@ var selfRefForms = []string{
 	"bạn", "ban", "mày", "ngài", "cậu", "kamu", "anda", "kau", "kalian", "คุณ", "เธอ",
 	// grec / suédois / danois / norvégien / swahili
 	"εσύ", "εσείς", "dig", "wewe", "nyinyi", "wena",
+}
 
-	// --- formes verbales de 2e personne (langues qui omettent le pronom) ---
+// selfVerbForms : formes VERBALES de 2e personne (langues qui omettent le pronom).
+// Elles comptent double : elles adressent la question à l'assistant ET elles portent la
+// relation « être » — c'est ce qui distingue « tu es quel modèle ? » de
+// « Kannst du dieses Modell benutzen ? » (peux-tu utiliser ce modèle), où « du » n'est
+// qu'un pronom.
+var selfVerbForms = []string{
 	"eres", "estas", "estás", "es-tu", "etes", "êtes", "sei", "bist", "seid",
 	"bent", "jestes", "jesteś", "misin", "musun", "ben", "εισαι", "jsi", "esti",
-	"você",
 	// verbes de 2e personne des langues servies : « quel modèle utilises-tu ? » peut
 	// arriver sans pronom séparé, surtout en espagnol, en italien et en turc.
 	"hablas", "usas", "funcionas", "falas", "parli", "usi", "funzioni",
@@ -91,14 +118,29 @@ var selfRefForms = []string{
 	"говоришь", "используешь", "работаешь", "تستخدم", "تتكلم", "تحدث",
 }
 
+// selfRefForms : pronoms de 2e personne + formes verbales. « isSelfRef » couvre les deux.
+var selfRefForms = append(append([]string(nil), selfPronounForms...), selfVerbForms...)
+
+// isSelfVerb : la forme est un VERBE de 2e personne (pas un simple pronom). Les formes
+// inversées recousues (« rede ich », « am I », « suis-je ») en contiennent toujours un.
+func isSelfVerb(t string) bool {
+	return containsForm(selfVerbForms, t) || containsForm(selfRefGlued, t)
+}
+
 // identityForms : mots qui parlent de l'identité, de la nature ou de l'origine du modèle.
-var identityForms = []string{
-	// modèle
+// identityFormsWeak : le mot « modèle » dans toutes les langues. AMBIGU — c'est un mot
+// de travail ordinaire — donc soumis au palier le plus serré (collé à la 2e personne).
+var identityFormsWeak = []string{
 	"model", "models", "modele", "modèle", "modelo", "modell", "modello", "modelu",
 	"модель", "модели", "модел", "modeli", "modelis", "malli", "模型", "モデル", "모델",
 	// déclinaisons slaves : « z modelem », « o modelu », « o modelach »
 	"modelem", "modelowi", "modelom", "modelach",
 	"نموذج", "मॉडल", "โมเดล", "μοντέλο", "mô", "hình",
+}
+
+// identityFormsStrong : tout le reste — IA, LLM, marques, version, nom, éditeur,
+// entraînement. Ces mots ne décrivent PAS un objet de travail : ils visent l'assistant.
+var identityFormsStrong = []string{
 	// IA / LLM / assistant
 	"llm", "ai", "ia", "ki", "chatbot", "assistant", "asystent", "assistent",
 	"ai模型", "大模型", "语言模型", "語言模型", "人工智能", "人工知能", "인공지능",
@@ -127,6 +169,47 @@ var identityForms = []string{
 	"训练", "訓練", "学習", "학습", "huấn", "luyện", "eğitildi", "प्रशिक्षित", "প্রশিক্ষণ",
 }
 
+// identityFormHit : mot d'identité, tous paliers confondus (le palier est appliqué par
+// l'appelant, qui seul connaît la distance à la 2e personne).
+func identityFormHit(word string) (string, bool) {
+	if _, ok := weakIdentityHit(word); ok {
+		return word, true
+	}
+	return strongIdentityHit(word)
+}
+
+func weakIdentityHit(word string) (string, bool) {
+	if containsForm(identityFormsWeak, word) {
+		return word, true
+	}
+	return "", false
+}
+
+func strongIdentityHit(word string) (string, bool) {
+	if containsForm(identityFormsStrong, word) {
+		return word, true
+	}
+	// Écriture non latine : l'arabe et le turc attachent le possessif et les désinences
+	// au mot (« نموذج » + « ك » = ton modèle), une égalité stricte les raterait.
+	rw := []rune(word)
+	if len(rw) == 0 || (rw[0] >= 'a' && rw[0] <= 'z') {
+		return "", false
+	}
+	for _, f := range identityFormsStrong {
+		rf := []rune(f)
+		if len(rf) >= 3 && len(rw) > len(rf) && strings.HasPrefix(word, f) {
+			return f, true
+		}
+	}
+	for _, f := range identityFormsWeak {
+		rf := []rune(f)
+		if len(rf) >= 3 && len(rw) > len(rf) && strings.HasPrefix(word, f) {
+			return f, true
+		}
+	}
+	return "", false
+}
+
 // possessiveIdentityForms : « TON modèle / TA version / TON nom » — langues qui attachent
 // le possessif au mot (arabe, turc, hébreu). Ces formes portent la 2e personne en elles :
 // les traiter comme de simples mots d'identité raterait « ما هو نموذجك ؟ » (quel est ton
@@ -143,7 +226,7 @@ var identityInterrogatives = []string{
 	"who", "whom", "whose", "what", "which",
 	"qui", "que", "quoi", "quel", "quelle", "quels", "quelles",
 	"quien", "quién", "quienes", "qué", "cual", "cuál", "quem", "qual", "quais",
-	"wer", "was", "welcher", "welche", "welches", "wie", "wat", "welk", "welke",
+	"wer", "was", "welcher", "welche", "welches", "welchem", "welchen", "wie", "wat", "welk", "welke",
 	"chi", "che", "cosa", "quale", "cine",
 	"kto", "kdo", "co", "jaki", "jaka", "jakie", "który", "ktora", "która",
 	"кто", "что", "какой", "какая", "какие", "хто", "що", "який", "яка",
@@ -265,29 +348,6 @@ func isSelfRef(t string) bool {
 	return containsForm(selfRefForms, t) || containsForm(selfRefGlued, t)
 }
 
-// identityFormHit : correspondance d'un mot d'identité. Égalité exacte, ou — pour une
-// écriture non latine — préfixe : l'arabe et le turc attachent le possessif et les
-// désinences au mot (« نموذج » + « ك » = ton modèle), une égalité stricte les raterait.
-func identityFormHit(word string) (string, bool) {
-	if containsForm(identityForms, word) {
-		return word, true
-	}
-	if containsForm(possessiveIdentityForms, word) {
-		return word, true
-	}
-	rw := []rune(word)
-	if len(rw) == 0 || (rw[0] >= 'a' && rw[0] <= 'z') {
-		return "", false // écriture latine : pas de préfixe (trop de collisions)
-	}
-	for _, f := range identityForms {
-		rf := []rune(f)
-		if len(rf) >= 3 && len(rw) > len(rf) && strings.HasPrefix(word, f) {
-			return f, true
-		}
-	}
-	return "", false
-}
-
 func containsForm(forms []string, word string) bool {
 	for _, f := range forms {
 		if f == word {
@@ -315,7 +375,7 @@ func structuralIdentityQuestion(user string) (bool, string) {
 	}
 	folded := foldLower(user)
 
-	// (1) Écritures sans espaces : proximité en CARACTÈRES.
+	// (1) Écritures sans espaces : proximité en CARACTÈRES, mêmes paliers.
 	if hasNoSpaceScript(folded) {
 		if ok, why := cjkIdentityAdjacency([]rune(folded)); ok {
 			return true, why
@@ -342,34 +402,93 @@ func structuralIdentityQuestion(user string) (bool, string) {
 	glued := strings.ReplaceAll(strings.Join(tokens, " "), "est ce que je", "estcequeje")
 	glued = strings.ReplaceAll(glued, "est ce que j", "estcequej")
 	tokens = strings.Fields(glued)
-	lastSelf, lastIdent, lastKind := -1, -1, ""
+
+	// Index de chaque famille, puis décision par palier.
+	var selfs, interrs, weaks, strongs []int
 	for i, t := range tokens {
-		if _, ok := identityFormHit(t); ok {
-			lastIdent, lastKind = i, "mot d'identité « "+t+" »"
-			// « ton modèle » porte déjà la 2e personne : c'est aussi une adresse à
-			// l'assistant.
+		switch {
+		case isSelfRef(t):
+			selfs = append(selfs, i)
+		case containsForm(identityInterrogatives, t):
+			interrs = append(interrs, i)
+		default:
+			// « ton modèle » porte déjà la 2e personne : le mot est des deux côtés.
 			if containsForm(possessiveIdentityForms, t) {
-				lastSelf = i
+				selfs = append(selfs, i)
+				strongs = append(strongs, i)
+				continue
 			}
-		} else if isSelfRef(t) {
-			lastSelf = i
-		} else if containsForm(identityInterrogatives, t) {
-			lastIdent, lastKind = i, "interrogatif « "+t+" »"
-		} else {
-			continue
+			if _, ok := weakIdentityHit(t); ok {
+				weaks = append(weaks, i)
+				continue
+			}
+			if _, ok := strongIdentityHit(t); ok {
+				strongs = append(strongs, i)
+			}
 		}
-		if lastSelf < 0 || lastIdent < 0 {
-			continue
+	}
+	if len(selfs) == 0 {
+		return false, ""
+	}
+	// Palier faible : le mot « modèle » est ambigu, il ne suffit pas d'être proche de la
+	// 2e personne — la question doit porter sur l'identité, c'est-à-dire contenir un mot
+	// interrogatif (« quel modèle es-tu ? ») ou une 2e personne qui est un VERBE
+	// (« ¿qué modelo eres? », « ce model ești? »). Sans cette condition,
+	// « Kannst du dieses Modell benutzen? » (peux-tu utiliser ce modèle) partait chez le
+	// vrai Claude.
+	weakOK := len(interrs) > 0
+	if !weakOK {
+		for _, sr := range selfs {
+			if isSelfVerb(tokens[sr]) {
+				weakOK = true
+				break
+			}
 		}
-		d := lastSelf - lastIdent
-		if d < 0 {
-			d = -d
+	}
+	for _, sr := range selfs {
+		if weakOK {
+			for _, w := range weaks {
+				if absInt(sr-w) <= weakIdentityProximity {
+					return true, "2e personne + « " + tokens[w] + " » collés (écart " + strconv.Itoa(absInt(sr-w)) + ")"
+				}
+			}
 		}
-		if d <= identityProximity {
-			return true, "2e personne + " + lastKind + " (écart " + strconv.Itoa(d) + " mot(s))"
+		for _, st := range strongs {
+			if absInt(sr-st) <= strongIdentityProximity {
+				return true, "2e personne + terme d'identité « " + tokens[st] + " » (écart " + strconv.Itoa(absInt(sr-st)) + ")"
+			}
+		}
+		for _, q := range interrs {
+			if absInt(sr-q) <= interrogativeProximity {
+				return true, "2e personne + interrogatif « " + tokens[q] + " » (écart " + strconv.Itoa(absInt(sr-q)) + ")"
+			}
 		}
 	}
 	return false, ""
+}
+
+// cjkCopulaBetween : une copule se trouve-t-elle entre la 2e personne (à l'index self)
+// et le mot « modèle », ou juste après lui (japonais, coréen : le verbe vient en fin) ?
+func cjkCopulaBetween(runes []rune, self, selfLen int) bool {
+	lo := self
+	if lo < 0 {
+		lo = 0
+	}
+	hi := self + selfLen + 2*cjkProximity
+	if hi > len(runes) {
+		hi = len(runes)
+	}
+	if lo > hi {
+		return false
+	}
+	return hasSubstringForm(cjkCopulas, string(runes[lo:hi]))
+}
+
+func absInt(n int) int {
+	if n < 0 {
+		return -n
+	}
+	return n
 }
 
 func hasNoSpaceScript(s string) bool {
@@ -402,11 +521,26 @@ func cjkIdentityAdjacency(runes []rune) (bool, string) {
 				hi = len(runes)
 			}
 			window := string(runes[lo:hi])
-			if hasSubstringForm(identityForms, window) {
-				return true, "2e personne « " + ref + " » + mot d'identité à moins de " + strconv.Itoa(cjkProximity) + " caractères"
+			if hasSubstringForm(identityFormsStrong, window) {
+				return true, "2e personne « " + ref + " » + terme d'identité à moins de " + strconv.Itoa(cjkProximity) + " caractères"
 			}
 			if hasSubstringForm(identityInterrogatives, window) {
 				return true, "2e personne « " + ref + " » + interrogatif à moins de " + strconv.Itoa(cjkProximity) + " caractères"
+			}
+			// Mot « modèle » : il doit être COLLÉ à la 2e personne, et une copule
+			// (verbe « être ») doit les relier. Sans cette copule, « 你能解释这个模型吗 »
+			// (peux-tu expliquer ce modèle) partirait chez le vrai Claude.
+			near := i - cjkWeakProximity
+			if near < 0 {
+				near = 0
+			}
+			far := i + len(rr) + cjkProximity
+			if far > len(runes) {
+				far = len(runes)
+			}
+			nearWindow := string(runes[near:far])
+			if hasSubstringForm(identityFormsWeak, nearWindow) && cjkCopulaBetween(runes, i, len(rr)) {
+				return true, "2e personne « " + ref + " » + copule + mot « modèle »"
 			}
 		}
 	}
