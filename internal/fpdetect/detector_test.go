@@ -190,6 +190,12 @@ func TestQuestionIdentiteFrancais(t *testing.T) {
 	for _, q := range []string{
 		"Quel modèle es-tu ?", "tu es quel modèle", "quel est ton modèle",
 		"votre modèle est quoi", "qui es-tu", "tu es Claude ?",
+		// Formes PARLÉES manquées en production le 2026-10-03 : le client a écrit
+		// « Tu es qui ? » et la question est restée sur le parc (aucune consommation
+		// chez le fournisseur externe). La table ne connaissait que « qui es-tu ».
+		"Tu es qui ?", "t'es qui", "tes qui", "vous êtes qui", "c'est qui toi",
+		"c'est quoi ton modèle", "tu es quoi", "tu utilises quel modèle",
+		"tu tournes sur quel modèle", "qui est tu",
 	} {
 		t.Run(q, func(t *testing.T) { mustRoute(t, body(t, q, nil)) })
 	}

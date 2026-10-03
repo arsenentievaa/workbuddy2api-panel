@@ -73,10 +73,26 @@ var modelIdentityPhrases = []string{
 	"what version of claude",
 	"which model are you",
 	"who are you",
+	// Formes abrégées d'usage courant (2026-10-03) : mêmes questions, écrites vite.
+	"who are u",
+	"what are u",
+	"what model r u",
+	"which model r u",
 
 	// --- Français ---
+	// Formes PARLÉES ajoutées le 2026-10-03 après un vrai test client : « Tu es qui ? »
+	// n'était reconnue par aucun motif (la table ne contenait que l'inversion
+	// « qui es-tu ») et la question est donc restée sur le parc, sans consommation chez
+	// le fournisseur externe. Un client qui teste écrit comme il parle : les deux formes
+	// doivent être présentes.
 	"c'est quel modele",
 	"c'est quel modèle",
+	"c'est quoi comme modele",
+	"c'est quoi comme modèle",
+	"c'est quoi ton modele",
+	"c'est quoi ton modèle",
+	"c'est qui toi",
+	"c'est qui vous",
 	"es-tu claude",
 	"es-tu gpt",
 	"identifie-toi",
@@ -89,17 +105,31 @@ var modelIdentityPhrases = []string{
 	"qui es-tu",
 	"qui etes-vous",
 	"qui êtes-vous",
+	"qui est tu",
+	"t'es qui",
+	"t'es quoi",
+	"tes qui",
 	"tu es claude",
 	"tu es gpt",
 	"tu es quel modele",
 	"tu es quel modèle",
 	"tu es quelle ia",
+	"tu es qui",
+	"tu es quoi",
+	"tu tournes sur quel modele",
+	"tu tournes sur quel modèle",
+	"tu utilises quel modele",
+	"tu utilises quel modèle",
+	"tu es base sur quel modele",
+	"tu es basé sur quel modèle",
 	"votre modele est quoi",
 	"votre modèle est quoi",
 	"vous etes claude",
 	"vous etes quel modele",
+	"vous etes qui",
 	"vous êtes claude",
 	"vous êtes quel modèle",
+	"vous êtes qui",
 
 	// --- Chinois simplifié ---
 	"什么模型",
