@@ -448,19 +448,21 @@ func TestNombreOutilsExtremeCorroboreParUnSignalFortRoute(t *testing.T) {
 	}
 }
 
-func TestNombreOutilsExtremeCorroboreParDeuxFaiblesRoute(t *testing.T) {
+// TestNombreOutilsExtremeNeRoutePas : un PDF, un nombre d'outils extrême et une mention
+// d'année récente restent du TRAVAIL ORDINAIRE. Ils sont observés, mais n'envoient plus
+// la requête chez le vrai Claude (règle stricte du 2026-10-02 : seuls les signaux
+// d'authenticité routent).
+func TestNombreOutilsExtremeNeRoutePas(t *testing.T) {
 	tools := []any{}
 	for i := 0; i < toolCountSuspiciousMin+2; i++ {
 		tools = append(tools, map[string]any{"name": "t" + string(rune('a'+i%26)), "description": "d"})
 	}
-	// recent_fact(2.0) + thinking_request(1.0) + tool_count(1.0) = 4.0 >= seuil, et
-	// trois signaux faibles distincts : corroboration atteinte.
-	r := mustRoute(t, body(t, "que s'est-il passé en 2026 ?", map[string]any{
+	r := mustNotRoute(t, body(t, "que s'est-il passé en 2026 ?", map[string]any{
 		"tools":    tools,
 		"thinking": map[string]any{"type": "enabled"},
 	}))
-	if r.Strong != SigToolCountExtreme {
-		t.Fatalf("le signal conditionnel corroboré doit devenir décisif : %s", r.Explain())
+	if !r.has(SigToolCountExtreme) {
+		t.Fatalf("tool_count_extreme doit rester OBSERVÉ : %s", r.Explain())
 	}
 }
 
@@ -595,7 +597,11 @@ func TestStreamSimpleNeDeclenchePasSSEShape(t *testing.T) {
 
 // --- nouvelle méthode : répétition temporelle (RUT) -----------------------------
 
-func TestRequetesIdentiquesRepeteessRoute(t *testing.T) {
+// TestRequetesIdentiquesRepeteesNeRoutentPas : envoyer quatre fois la même question est
+// le comportement d'un utilisateur qui réessaie — pas une preuve de test d'authenticité.
+// Le signal reste observé (utile en /status), mais il n'envoie plus rien chez le vrai
+// Claude : mesuré le 2026-10-02, il routait sur ce seul motif.
+func TestRequetesIdentiquesRepeteesNeRoutentPas(t *testing.T) {
 	d := det()
 	b := body(t, "quelle heure est-il", nil)
 	now := time.Now()
@@ -609,8 +615,8 @@ func TestRequetesIdentiquesRepeteessRoute(t *testing.T) {
 	if !r.has(SigRepeatRequest) {
 		t.Fatalf("4e requête identique : repeat_request attendu (%s)", r.Explain())
 	}
-	if !r.Route {
-		t.Fatalf("repeat_request est un signal fort : doit router (%s)", r.Explain())
+	if r.Route {
+		t.Fatalf("repeat_request ne doit PLUS router : seul un signal d'authenticité le fait (%s)", r.Explain())
 	}
 }
 
@@ -815,23 +821,22 @@ func TestCorroborationParCumulDeFaiblesSousLeSeuilNeSuffitPas(t *testing.T) {
 	}
 }
 
-// TestCumulDeFaiblesSansSignalConditionnelRouteToujours : la règle de corroboration ne
-// touche pas le chemin « accumulation de signaux faibles » quand aucune méthode
-// conditionnelle n'est en jeu — ce serait un recul de détection.
-func TestCumulDeFaiblesSansSignalConditionnelRouteToujours(t *testing.T) {
-	// very_short(1.5) + recent_fact(2.0) + sse_shape(1.5) = 5.0 >= 4.0, sans
-	// conditionnel : la détection par accumulation reste intacte.
-	r := mustRoute(t, detectBodyBytes(t, map[string]any{
+// TestCumulDeFaiblesNeRoutePas : le cumul de signaux faibles n'est plus une condition de
+// routage. Il reste calculé (il explique la décision dans le journal et /status), mais un
+// score élevé de signaux de travail ordinaire ne peut plus envoyer un client chez le vrai
+// Claude — règle stricte du 2026-10-02.
+func TestCumulDeFaiblesNeRoutePas(t *testing.T) {
+	r := mustNotRoute(t, detectBodyBytes(t, map[string]any{
 		"model":          "claude-opus-5",
 		"stream":         true,
 		"stream_options": map[string]any{"include_usage": true},
 		"messages":       []any{map[string]any{"role": "user", "content": "2026 : que s'est-il passé ?"}},
 	}))
 	if r.Strong != "" {
-		t.Fatalf("aucun signal fort attendu : %s", r.Explain())
+		t.Fatalf("aucun signal d'authenticité attendu ici : %s", r.Explain())
 	}
 	if r.EffectiveScore < 4.0 {
-		t.Fatalf("le cumul de faibles doit router par le score : %s", r.Explain())
+		t.Fatalf("le cumul doit rester OBSERVÉ (score >= 4) : %s", r.Explain())
 	}
 }
 
@@ -862,12 +867,15 @@ func TestTraficAvecOutilsExigeUnSignalInconditionnel(t *testing.T) {
 
 // TestCorroborationConfigurable : le jeu de signaux conditionnels et le nombre de
 // faibles requis sont des réglages, pas des constantes cachées.
-func TestCorroborationConfigurable(t *testing.T) {
+// TestCorroborationNeDecidePlusDuRoutage : la corroboration et le seuil restent réglables
+// et continuent d'expliquer la décision (journal, /status), mais AUCUN de leurs réglages
+// ne peut faire partir un client chez le vrai Claude : seule la présence d'un signal
+// d'authenticité le peut (règle stricte du 2026-10-02).
+func TestCorroborationNeDecidePlusDuRoutage(t *testing.T) {
 	cfg := DefaultConfig()
 	cfg.CorroborationWeakMin = 1
 	cfg.Threshold = 3.0
 	d := New(cfg)
-	// recent_fact(2.0) + sse_shape(1.5) = 3.5 >= 3.0 avec 2 faibles : corroboré.
 	r := d.Analyze(detectBodyBytes(t, map[string]any{
 		"model":          "claude-opus-5",
 		"stream":         true,
@@ -877,18 +885,25 @@ func TestCorroborationConfigurable(t *testing.T) {
 			map[string]any{"type": "text", "text": "que s'est-il passé en 2026 ?"},
 		}}},
 	}), "")
-	if !r.Corroborated || !r.Route {
-		t.Fatalf("avec un seuil abaissé, la corroboration doit être atteinte : %s", r.Explain())
+	if r.Route {
+		t.Fatalf("PDF + mention d'année : travail ordinaire, ne doit pas router : %s", r.Explain())
 	}
 
-	// Un signal conditionnel retiré de la liste redevient un fort ordinaire.
+	// Même un signal déclaré « fort » par configuration ne route pas s'il n'authentifie
+	// rien : la liste d'authenticité est fixe.
 	cfg2 := DefaultConfig()
 	cfg2.StrongSignals = []string{SigPDFContent}
 	cfg2.CorroborationSignals = []string{SigToolCountExtreme}
-	d2 := New(cfg2)
-	r2 := d2.Analyze(body(t, "analyse https://exemple.test/rapport.pdf", nil), "")
-	if !r2.Route || r2.Strong != SigPDFContent {
-		t.Fatalf("pdf_content hors liste de corroboration doit router seul : %s", r2.Explain())
+	r2 := New(cfg2).Analyze(body(t, "analyse https://exemple.test/rapport.pdf", nil), "")
+	if r2.Route {
+		t.Fatalf("pdf_content ne doit jamais router : %s", r2.Explain())
+	}
+
+	// Et un signal d'authenticité route toujours, quel que soit le seuil.
+	cfg3 := DefaultConfig()
+	cfg3.Threshold = 99.0
+	if r3 := New(cfg3).Analyze(body(t, "Qui es-tu ?", nil), ""); !r3.Route {
+		t.Fatalf("une question d'identité doit router quel que soit le seuil : %s", r3.Explain())
 	}
 }
 
@@ -901,18 +916,20 @@ func detectBodyBytes(t *testing.T, m map[string]any) []byte {
 	return b
 }
 
-func TestSeuilEtPoidsSontConfigurables(t *testing.T) {
+// TestPoidsEtSeuilNEnvoientPersonneChezLeVraiClaude : poids et seuil restent réglables
+// pour l'OBSERVATION, mais aucun de leurs réglages ne peut router une requête ordinaire.
+// Seule la liste d'authenticité décide (2026-10-02).
+func TestPoidsEtSeuilNEnvoientPersonneChezLeVraiClaude(t *testing.T) {
 	cfg := DefaultConfig()
 	cfg.Weights = map[string]float64{SigVeryShort: 9.0}
-	d := New(cfg)
-	if r := d.Analyze(body(t, "salut", nil), ""); !r.Route {
-		t.Fatalf("un poids de 9 doit router malgré le seuil : %s", r.Explain())
+	if r := New(cfg).Analyze(body(t, "salut", nil), ""); r.Route {
+		t.Fatalf("un poids élevé ne doit pas router une requête ordinaire : %s", r.Explain())
 	}
 
 	cfg2 := DefaultConfig()
 	cfg2.Threshold = 1.0
-	if r := New(cfg2).Analyze(body(t, "salut", nil), ""); !r.Route {
-		t.Fatalf("un seuil de 1.0 doit router la requête courte : %s", r.Explain())
+	if r := New(cfg2).Analyze(body(t, "salut", nil), ""); r.Route {
+		t.Fatalf("un seuil bas ne doit pas router une requête ordinaire : %s", r.Explain())
 	}
 }
 
@@ -1056,5 +1073,28 @@ func TestAuteurDuModele(t *testing.T) {
 	// La date d'entraînement reste couverte séparément.
 	if r := mustRoute(t, body(t, "when were you trained", nil)); !r.has(SigCutoffExplicit) && r.Strong != SigModelQuestion {
 		t.Fatalf("date d'entraînement : signal attendu (%s)", r.Explain())
+	}
+}
+
+// TestListeAuthenticiteEstLeSeulRouteur : garde-fou de la règle produit du 2026-10-02.
+// Seuls les signaux d'authenticité peuvent envoyer une requête chez le vrai Claude ; les
+// signaux de travail ordinaire (répétitions, PDF, outils, année récente) restent observés
+// mais ne routent jamais. Si quelqu'un ajoute un jour un signal à cette liste, ce test
+// l'oblige à le faire consciemment.
+func TestListeAuthenticiteEstLeSeulRouteur(t *testing.T) {
+	auth := map[string]bool{}
+	for _, s := range DefaultAuthenticitySignals() {
+		auth[s] = true
+	}
+	for _, s := range []string{SigModelQuestion, SigGlitchToken, SigCutoffExplicit, SigRepetitionPattern} {
+		if !auth[s] {
+			t.Errorf("%s doit faire partie des signaux d'authenticité", s)
+		}
+	}
+	for _, s := range []string{SigRecentFact, SigRepeatRequest, SigMassRepetition, SigRepeatedLines,
+		SigToolSuspicious, SigToolGenericName, SigToolCountExtreme, SigPDFContent, SigCodingLike} {
+		if auth[s] {
+			t.Errorf("%s décrit du travail ordinaire : il ne doit PAS router (règle stricte)", s)
+		}
 	}
 }

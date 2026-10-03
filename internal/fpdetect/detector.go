@@ -137,6 +137,40 @@ var defaultStrong = []string{
 	SigPDFContent, SigRepeatedLines, SigToolGenericName, SigLanguageMismatch,
 }
 
+// defaultAuthenticity : les SEULS signaux qui envoient une requête chez le fournisseur
+// externe (vrai Claude).
+//
+// Règle posée par l'exploitant (2026-10-02) : « le canal CrazyToken doit uniquement
+// servir les requêtes des clients qui cherchent à savoir s'il s'agit d'un modèle Claude
+// légitime, ou qui utilisent des outils d'authentification ; dans tous les autres cas,
+// absolument tout doit passer par le canal du mapping Claude-DeepSeek ». Règle stricte,
+// sans exception.
+//
+// Ce qui authentifie réellement un modèle :
+//   - model_question     : question explicite sur l'identité (« qui es-tu ? ») ;
+//   - glitch_token       : jeton piège — l'outil canonique de détection de modèle ;
+//   - cutoff_explicit    : question sur la date ou l'auteur de l'entraînement ;
+//   - repetition_pattern : consigne chiffrée du type « répète le mot pomme 150 fois ».
+//
+// Le désaccord de langue (réponse en chinois à une question qui ne l'est pas) est un
+// cinquième cas, mais il vit sur le chemin de RÉPONSE et route par lui-même (voir
+// fpdetect/cjk.go) : il n'est donc pas listé ici.
+//
+// Tout le reste — répétitions de caractères, lignes répétées, PDF joints, nombre
+// d'outils, noms d'outils génériques, mention d'une année récente, requêtes identiques
+// répétées — décrit du TRAVAIL ORDINAIRE : mesuré en production le 2026-10-02, ces
+// signaux envoyaient chez le vrai Claude des clients qui écrivaient simplement du code.
+// Ils restent OBSERVÉS (visibles dans /status) mais ne décident plus rien.
+var defaultAuthenticity = []string{
+	SigModelQuestion, SigGlitchToken, SigCutoffExplicit, SigRepetitionPattern,
+}
+
+// DefaultAuthenticitySignals : copie de la liste d'authenticité, pour l'exposer dans
+// /status (l'exploitant doit pouvoir lire la règle de routage sans relire le code).
+func DefaultAuthenticitySignals() []string {
+	return append([]string(nil), defaultAuthenticity...)
+}
+
 // Config règle le détecteur.
 type Config struct {
 	Threshold     float64            // seuil du score cumulé
@@ -361,7 +395,10 @@ type Detector struct {
 	cfg           Config
 	strong        map[string]bool
 	corroboration map[string]bool
-	state         *State
+	// authenticity : signaux qui, seuls, envoient la requête chez le fournisseur
+	// externe. Voir defaultAuthenticity pour la règle et sa justification.
+	authenticity map[string]bool
+	state        *State
 }
 
 // New construit un détecteur. Les champs de Config absents retombent sur les défauts.
@@ -406,7 +443,14 @@ func New(cfg Config) *Detector {
 	if cfg.State == nil {
 		cfg.State = NewState(cfg.RepeatWindow, 0, 0)
 	}
-	return &Detector{cfg: cfg, strong: strong, corroboration: corroboration, state: cfg.State}
+	// Authenticity : liste FIXE (voir defaultAuthenticity). Elle n'est pas configurable
+	// à dessein : c'est la règle produit « le vrai Claude ne sert qu'aux tests
+	// d'authenticité », pas un réglage d'exploitation qui pourrait dériver.
+	authenticity := make(map[string]bool, len(defaultAuthenticity))
+	for _, s := range defaultAuthenticity {
+		authenticity[s] = true
+	}
+	return &Detector{cfg: cfg, strong: strong, corroboration: corroboration, authenticity: authenticity, state: cfg.State}
 }
 
 func (d *Detector) weight(name string) float64 {
@@ -620,7 +664,16 @@ func (d *Detector) decide(res *Result) {
 
 	res.EffectiveScore += res.Score
 	res.Strong = decisiveStrong
-	res.Route = res.Strong != "" || res.EffectiveScore >= d.cfg.Threshold
+	// DÉCISION (règle stricte de l'exploitant, 2026-10-02) : seuls les signaux
+	// d'AUTHENTICITÉ routent. Ni un signal de travail ordinaire, ni un cumul de tels
+	// signaux, ni même un signal conditionnel corroboré ne peut envoyer un client chez
+	// le vrai Claude : tout ce qui n'est pas un test d'authenticité doit rester sur le
+	// canal du mapping Claude-DeepSeek.
+	//
+	// Le score cumulé n'est donc plus une condition de routage : il ne sert plus qu'à
+	// l'observation (/status). La corroboration garde son rôle d'affichage (elle
+	// explique pourquoi un signal conditionnel est retenu ou écarté) mais ne décide plus.
+	res.Route = d.authenticity[res.Strong]
 }
 
 // Analyze analyse avec l'horloge courante.
