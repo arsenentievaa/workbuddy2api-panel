@@ -96,6 +96,8 @@ var identityForms = []string{
 	// modèle
 	"model", "models", "modele", "modèle", "modelo", "modell", "modello", "modelu",
 	"модель", "модели", "модел", "modeli", "modelis", "malli", "模型", "モデル", "모델",
+	// déclinaisons slaves : « z modelem », « o modelu », « o modelach »
+	"modelem", "modelowi", "modelom", "modelach",
 	"نموذج", "मॉडल", "โมเดล", "μοντέλο", "mô", "hình",
 	// IA / LLM / assistant
 	"llm", "ai", "ia", "ki", "chatbot", "assistant", "asystent", "assistent",
@@ -209,6 +211,60 @@ func identityTokens(s string) []string {
 	})
 }
 
+// selfRefBigrams : formes interrogatives inversées en DEUX mots — « am I », « suis-je »,
+// « rede ich », « est-ce que je ». Le pronom y est séparé du verbe, donc absent de la
+// liste de pronoms ; on recoud ces paires avant la comparaison. Elles sont
+// reconnaissables et quasi absentes d'un prompt de travail, contrairement à un « je »
+// ou un « ich » isolés, volontairement écartés (faux positifs sur « quel modèle je dois
+// utiliser pour ce projet ? »).
+var selfRefBigrams = [][2]string{
+	{"am", "i"}, {"suis", "je"}, {"rede", "ich"}, {"spreche", "ich"},
+	{"parle", "je"}, {"hablo", "yo"}, {"czy", "ja"}, {"czy", "ty"},
+	{"parlo", "io"}, {"falo", "eu"}, {"говори", "я"},
+}
+
+// selfRefGlued : formes de deux mots recousues (« am i » → « ami »), comparées ensuite
+// comme un mot ordinaire. Rempli au chargement à partir de selfRefBigrams.
+var selfRefGlued = func() []string {
+	out := make([]string, 0, len(selfRefBigrams))
+	for _, b := range selfRefBigrams {
+		out = append(out, b[0]+b[1])
+	}
+	out = append(out, "estcequeje", "estcequej")
+	return out
+}()
+
+// glueSelfRefs recoud les paires de selfRefBigrams dans la liste de mots.
+func glueSelfRefs(tokens []string) []string {
+	if len(tokens) < 2 {
+		return tokens
+	}
+	out := make([]string, 0, len(tokens))
+	for i := 0; i < len(tokens); i++ {
+		if i+1 < len(tokens) {
+			joined := false
+			for _, b := range selfRefBigrams {
+				if tokens[i] == b[0] && tokens[i+1] == b[1] {
+					out = append(out, b[0]+b[1])
+					i++
+					joined = true
+					break
+				}
+			}
+			if joined {
+				continue
+			}
+		}
+		out = append(out, tokens[i])
+	}
+	return out
+}
+
+// isSelfRef : pronom, verbe de 2e personne, ou forme inversée recousue.
+func isSelfRef(t string) bool {
+	return containsForm(selfRefForms, t) || containsForm(selfRefGlued, t)
+}
+
 // identityFormHit : correspondance d'un mot d'identité. Égalité exacte, ou — pour une
 // écriture non latine — préfixe : l'arabe et le turc attachent le possessif et les
 // désinences au mot (« نموذج » + « ك » = ton modèle), une égalité stricte les raterait.
@@ -281,7 +337,11 @@ func structuralIdentityQuestion(user string) (bool, string) {
 		}
 	}
 
-	tokens := identityTokens(user)
+	tokens := glueSelfRefs(identityTokens(user))
+	// « est-ce que je » arrive aussi en quatre mots.
+	glued := strings.ReplaceAll(strings.Join(tokens, " "), "est ce que je", "estcequeje")
+	glued = strings.ReplaceAll(glued, "est ce que j", "estcequej")
+	tokens = strings.Fields(glued)
 	lastSelf, lastIdent, lastKind := -1, -1, ""
 	for i, t := range tokens {
 		if _, ok := identityFormHit(t); ok {
@@ -291,7 +351,7 @@ func structuralIdentityQuestion(user string) (bool, string) {
 			if containsForm(possessiveIdentityForms, t) {
 				lastSelf = i
 			}
-		} else if containsForm(selfRefForms, t) {
+		} else if isSelfRef(t) {
 			lastSelf = i
 		} else if containsForm(identityInterrogatives, t) {
 			lastIdent, lastKind = i, "interrogatif « "+t+" »"

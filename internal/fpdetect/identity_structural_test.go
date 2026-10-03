@@ -66,3 +66,22 @@ func analyzeForTest(t *testing.T, user string) Result {
 	}
 	return d.Analyze(b, "")
 }
+
+// TestFormesInversees : « what model am I talking to? », « rede ich », « est-ce que je ».
+// Famille réelle de tests d'authenticité : le client demande à quel modèle IL parle.
+// Ces formes sont reconnaissables, donc sans le risque de faux positif d'un « je » isolé.
+func TestFormesInversees(t *testing.T) {
+	for _, s := range []string{
+		"What model am I talking to?", "Which model am I speaking with?",
+		"Mit welchem Modell rede ich hier?", "Welches Modell spreche ich gerade an?",
+		"À quel modèle est-ce que je parle ?", "Quel modèle suis-je en train d'utiliser ?",
+		"¿Con qué modelo hablo yo?", "Con quale modello parlo io?",
+		"Czy ja rozmawiam z modelem?",
+	} {
+		t.Run(s, func(t *testing.T) { mustRoute(t, body(t, s, nil)) })
+	}
+	// « je » isolé ne doit PAS router : question de travail ordinaire.
+	if r := mustNotRoute(t, body(t, "Quel modèle je dois utiliser pour ce projet ?", nil)); r.has(SigModelQuestion) {
+		t.Fatalf("un « je » isolé ne doit pas déclencher la sonde : %s", r.Explain())
+	}
+}
