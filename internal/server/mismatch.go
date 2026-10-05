@@ -124,10 +124,40 @@ func (h *Handler) rerouteOnMismatch(w http.ResponseWriter, r *http.Request, body
 	}
 	now := time.Now()
 	key := rerouteIdentity(r, body, rr.ClientIDHeader)
-	// Budget DÉDIÉ (DecideLeak) et non le plafond anti-abus des sondes : une réponse
-	// fausse déjà facturée au client doit pouvoir être remplacée même si ce client a
-	// épuisé son quota de sondes.
-	allowed, reason := rr.DecideLeak(r.Context(), key, now)
+	// Un rejeu de remède ne se remédie pas lui-même (voir leak_retry.go) : sans cette
+	// garde, une réponse rejouée qui fuit encore déclencherait un rejeu sans fin.
+	if h.isLeakRetry(r) {
+		return false
+	}
+
+	// Le budget est consommé UNE fois pour les deux remèdes (parc puis fournisseur) : le
+	// compter deux fois épuiserait le plafond deux fois plus vite que voulu.
+	budgetOK, budgetReason := true, ""
+	if rr.Stats != nil {
+		budgetOK, budgetReason = rr.Stats.AllowLeakReroute(key, now)
+	}
+
+	// 1) REMÈDE PAR LE PARC : rejouer la requête avec la consigne de langue. Indépendant du
+	//    fournisseur externe — mesuré le 2026-10-05 : 46 fuites sur 46 subies parce que ce
+	//    fournisseur était à sec (403 Insufficient balance), aucun remède appliqué.
+	if budgetOK && h.replayOnPool(w, r, body, clientModel, stream, st) {
+		if h.cfg.FPStats != nil {
+			h.cfg.FPStats.NoteMismatchRerouted()
+		}
+		return true
+	}
+
+	// 2) REMÈDE PAR LE FOURNISSEUR EXTERNE (chemin historique). La santé de ce fournisseur est
+	//    vérifiée ici et non avant le rejeu : elle ne conditionne que ce chemin. La logique de
+	//    DecideLeak est reprise sur place pour ne pas consommer le budget une seconde fois.
+	healthy, justDown := rr.Probe(r.Context())
+	if !healthy && justDown && rr.Stats != nil {
+		rr.Stats.NoteHealthBlocked()
+	}
+	allowed, reason := budgetOK, budgetReason
+	if allowed && !healthy {
+		allowed, reason = false, reasonHealth
+	}
 	if !allowed {
 		// Refus (budget dédié atteint, upstream malsain) : le client garde bel et bien
 		// la réponse incohérente. C'est une fuite subie, donc elle compte au même titre

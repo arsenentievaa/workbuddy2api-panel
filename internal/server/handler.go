@@ -33,6 +33,10 @@ type Config struct {
 	Upstream  *upstream.Client
 	APIKey    string // 空 = 不鉴权（静态值；与 Live 同时给出时 Live 优先）
 	MaxRotate int    // 单请求最多换号次数，默认 3
+	// Listen : adresse d'écoute (":7863"). Sert au rejeu interne du remède aux fuites de
+	// langue (voir leak_retry.go) : la requête rejouée reste dans le conteneur, marquée
+	// d'un secret tiré au démarrage.
+	Listen string
 	// Session 会话粘性路由器（可选；nil = 关闭粘性，纯 Pick 轮换）。
 	Session *session.Router
 	// StickyCount 返回当前粘性会话绑定数（供 /status）；nil 时报告 0。
@@ -118,6 +122,9 @@ type Handler struct {
 	cfg     Config
 	mux     *http.ServeMux
 	degrade degradeGate
+	// internalAddr : adresse d'écoute, pour rejouer une requête sur le parc (voir
+	// leak_retry.go). Statique, volontairement hors du rechargement de configuration.
+	internalAddr string
 	// wafIP WAF IP 级拦截状态机（fail-fast，wafip.go）：短窗多号 WAF 403 →
 	// 激活期轮转遇 WAF 403 直接终止（不放大请求量）。进程内状态、重启清零。
 	wafIP wafIPGate
@@ -137,7 +144,7 @@ func NewHandler(cfg Config) *Handler {
 	if cfg.PromptMode == "" {
 		cfg.PromptMode = "custom" // 缺省 custom：网关自有提示词
 	}
-	h := &Handler{cfg: cfg, mux: http.NewServeMux()}
+	h := &Handler{cfg: cfg, mux: http.NewServeMux(), internalAddr: cfg.Listen}
 	h.mux.HandleFunc("POST /v1/chat/completions", h.withAuth(h.chatCompletions))
 	// Surface Anthropic (Messages) : réservée aux sondes reroutées. Voir
 	// Handler.anthropicMessages pour le périmètre et sa justification.
@@ -731,7 +738,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	// réécrite pour CodeBuddy, et surtout ce chemin ne doit consommer ni quota de
 	// compte, ni place dans le pool, ni liaison de session. Si le reroutage échoue, on
 	// poursuit simplement vers la boucle de comptes ci-dessous (fail-open).
-	if fpIsProbe && h.cfg.Rerouter != nil && h.cfg.Rerouter.Enabled {
+	if fpIsProbe && !h.isLeakRetry(r) && h.cfg.Rerouter != nil && h.cfg.Rerouter.Enabled {
 		if h.tryReroute(w, r, body, clientModel, peek.Stream, st) {
 			return
 		}

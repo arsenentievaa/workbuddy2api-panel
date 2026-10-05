@@ -390,6 +390,7 @@ func main() {
 	}
 
 	h := server.NewHandler(server.Config{
+		Listen:       cfg.Listen, // rejeu interne du remède aux fuites de langue
 		Pool:         p,
 		Upstream:     up,
 		APIKey:       cfg.APIKey,
