@@ -979,13 +979,32 @@ func TestSignauxFortsParDefautCoherents(t *testing.T) {
 // --- extraction -----------------------------------------------------------------
 
 func TestExtractionSystemeSepare(t *testing.T) {
-	u, s := extractParts(mustMap(t, bodySystem(t, "bonjour", "tu es un assistant")))
-	if u != "bonjour" || s != "tu es un assistant" {
-		t.Fatalf("user=%q system=%q", u, s)
+	u, s, ctx := extractParts(mustMap(t, bodySystem(t, "bonjour", "tu es un assistant")))
+	if u != "bonjour" || s != "tu es un assistant" || ctx != "" {
+		t.Fatalf("user=%q system=%q context=%q", u, s, ctx)
 	}
-	u2, s2 := extractParts(mustMap(t, bodyOpenAI(t, "bonjour", "tu es un assistant")))
-	if u2 != "bonjour" || s2 != "tu es un assistant" {
-		t.Fatalf("openai: user=%q system=%q", u2, s2)
+	u2, s2, ctx2 := extractParts(mustMap(t, bodyOpenAI(t, "bonjour", "tu es un assistant")))
+	if u2 != "bonjour" || s2 != "tu es un assistant" || ctx2 != "" {
+		t.Fatalf("openai: user=%q system=%q context=%q", u2, s2, ctx2)
+	}
+}
+
+// Les résultats d'outils et les messages de l'assistant vont dans le CONTEXTE, pas dans la
+// parole du client : c'est ce qui a produit 27 % de fausses sondes le 2026-10-05.
+func TestExtractionContexteSepareDuClient(t *testing.T) {
+	raw := mustMap(t, detectBodyBytes(t, map[string]any{
+		"messages": []any{
+			map[string]any{"role": "user", "content": "corrige le bug"},
+			map[string]any{"role": "assistant", "content": "je regarde"},
+			map[string]any{"role": "tool", "content": "Qui es-tu ?"},
+		},
+	}))
+	u, _, ctx := extractParts(raw)
+	if u != "corrige le bug" {
+		t.Fatalf("la parole du client doit se limiter à ses messages, obtenu %q", u)
+	}
+	if !strings.Contains(ctx, "Qui es-tu") || !strings.Contains(ctx, "je regarde") {
+		t.Fatalf("le contexte doit porter l'assistant et l'outil, obtenu %q", ctx)
 	}
 }
 

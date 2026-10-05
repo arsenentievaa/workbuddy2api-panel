@@ -340,7 +340,7 @@ func (d *Detector) AnalyzeResponse(reqBody []byte, output string) Result {
 	if err := json.Unmarshal(reqBody, &raw); err != nil {
 		return res
 	}
-	input, _ := extractParts(raw)
+	input, _, _ := extractParts(raw)
 	if !languageMismatch(input, output) {
 		return res
 	}
@@ -472,9 +472,10 @@ func (d *Detector) AnalyzeAt(body []byte, clientKey string, now time.Time) Resul
 	if err := json.Unmarshal(body, &raw); err != nil {
 		return Result{} // corps illisible : aucun signal, l'appelant retombe en route normale
 	}
-	user, system := extractParts(raw)
+	user, system, context := extractParts(raw)
 	userLower := strings.ToLower(user)
-	fullLower := userLower + "\n" + strings.ToLower(system)
+	// fullLower sert au SEUL balayage des jetons pièges : il garde tout le texte.
+	fullLower := userLower + "\n" + strings.ToLower(system) + "\n" + strings.ToLower(context)
 
 	res := Result{UserChars: len(user), EstimatedTokens: estimateTokens(user)}
 	// add enregistre un signal déclenché. Il ne décide de rien : Strong et Route sont
@@ -824,10 +825,21 @@ func textOf(v any) string {
 	return ""
 }
 
-// extractParts retourne (texte utilisateur, texte système). Le système est isolé :
-// un long prompt système signale un agent de codage, pas une sonde.
-func extractParts(raw map[string]any) (string, string) {
-	var user, sys strings.Builder
+// extractParts retourne (parole du CLIENT, texte système, contexte).
+//
+// POURQUOI TROIS PARTIES ET NON DEUX. Jusqu'au 2026-10-05, tout ce qui n'était ni system ni
+// developer était traité comme la parole du client — donc les RÉSULTATS D'OUTILS et les
+// messages précédents de l'assistant aussi. Les règles de sonde les jugeaient comme la
+// question du client : mesuré en production, 27 % du trafic était classé « sonde » parce
+// qu'un journal d'outil contenait une phrase d'identité ou parce qu'une réponse antérieure
+// portait une consigne de répétition. Un test d'authenticité, lui, est ce que le CLIENT
+// écrit.
+//
+// Les règles de sonde ne lisent donc que `user` ; seul le balayage des jetons pièges garde
+// le texte complet (un jeton piège peut très bien arriver par un fichier ou un outil, et il
+// ne prête pas à confusion).
+func extractParts(raw map[string]any) (string, string, string) {
+	var user, sys, ctx strings.Builder
 	if s := textOf(raw["system"]); s != "" {
 		sys.WriteString(s)
 	}
@@ -842,12 +854,15 @@ func extractParts(raw map[string]any) (string, string) {
 			switch role {
 			case "system", "developer":
 				sys.WriteString(txt)
-			default:
+			case "user":
 				user.WriteString(txt)
+			default:
+				// assistant, tool, function : du CONTEXTE, pas la parole du client.
+				ctx.WriteString(txt)
 			}
 		}
 	}
-	return user.String(), sys.String()
+	return user.String(), sys.String(), ctx.String()
 }
 
 func estimateTokens(s string) int { return len(s) / 4 }
