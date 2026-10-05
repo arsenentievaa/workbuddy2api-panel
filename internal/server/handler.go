@@ -711,6 +711,19 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		systemPrompt = prompt.Identity(prompt.ModelDisplayName(origin)) + h.cfg.PromptText
 	}
 
+	// La consigne de langue FERME le prompt.
+	//
+	// Le texte produit de la passerelle est en chinois : place en fin de prompt, il pesait plus
+	// que tout le reste, et le modele y repondait en chinois. Mesure du 2026-10-05 : 46 reponses
+	// incoherentes servies au client (alerte Telegram), reproduites en laboratoire sur des requetes
+	// d'agent — petit message utilisateur (« continue », « ok ») apres un long prompt systeme :
+	// le modele n'avait alors aucune indication de langue dans les derniers milliers de jetons.
+	// Ce qui est lu en dernier pese le plus : la consigne de langue vient donc en dernier.
+	// (Mode « custom » exclu : l'exploitant y impose son propre prompt a la lettre.)
+	if systemPrompt != "" && h.cfg.PromptMode != "custom" {
+		systemPrompt += "\n" + prompt.LanguageDirective
+	}
+
 	// Reroutage d'une sonde vers l'upstream externe (phase 2).
 	//
 	// Placé AVANT la réécriture du prompt et AVANT toute sélection de compte : le
