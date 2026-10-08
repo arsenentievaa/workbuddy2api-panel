@@ -727,7 +727,15 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	// le modele n'avait alors aucune indication de langue dans les derniers milliers de jetons.
 	// Ce qui est lu en dernier pese le plus : la consigne de langue vient donc en dernier.
 	// (Mode « custom » exclu : l'exploitant y impose son propre prompt a la lettre.)
-	if systemPrompt != "" && h.cfg.PromptMode != "custom" {
+	// La consigne de langue s'applique a TOUS les modeles et dans TOUS les modes.
+	//
+	// Elle etait auparavant exclue du mode « custom » — celui de la passerelle — et seuls les
+	// modeles Claude recevaient une consigne equivalente, via leur prompt d'identite. Resultat :
+	// une demande adressee a gpt-*, gemini-*, kimi-* ou grok-* pouvait recevoir une reponse en
+	// chinois, le prompt produit de la passerelle etant lui-meme en chinois (constat 2026-10-08).
+	// Ce qui est lu en dernier pese le plus : la consigne ferme donc le prompt, quelle que soit
+	// l'identite annoncee au client.
+	if systemPrompt != "" {
 		systemPrompt += "\n" + prompt.LanguageDirective
 	}
 
