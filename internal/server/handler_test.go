@@ -1547,8 +1547,16 @@ func TestCustomModeFingerprintSanitizePreserved(t *testing.T) {
 		mm := m.(map[string]any)
 		if mm["role"] == "system" {
 			systemCount++
-			if mm["content"] != customSys {
-				t.Errorf("system content=%v want %q", mm["content"], customSys)
+			contenu, _ := mm["content"].(string)
+			// Le prompt de l'exploitant est bien la base, mais la consigne de langue le ferme
+			// desormais (2026-10-08) : sans elle, une demande adressee a gpt-*, gemini-*, kimi-*
+			// ou grok-* pouvait recevoir une reponse en chinois, le prompt produit par la
+			// passerelle etant lui-meme en chinois.
+			if !strings.HasPrefix(contenu, customSys) {
+				t.Errorf("system content=%v doit commencer par %q", mm["content"], customSys)
+			}
+			if !strings.Contains(contenu, prompt.LanguageDirective) {
+				t.Errorf("la consigne de langue doit fermer le prompt systeme : %v", mm["content"])
 			}
 		}
 	}
