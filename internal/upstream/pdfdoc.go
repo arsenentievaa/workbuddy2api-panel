@@ -24,6 +24,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"log"
+	"os"
 	"os/exec"
 	"strconv"
 	"strings"
@@ -53,11 +54,34 @@ func ConfigurePDFRendering(python, script string) {
 	}
 }
 
-// pdfPython 执行渲染脚本的解释器。镜像里指向装有 PyMuPDF 的 venv
-// （Dockerfile 的 ENV PDF_PYTHON）。装机时若 PyMuPDF 安装失败，venv 仍存在但没有
-// 该模块：脚本会以退出码 3 报告「pymupdf absent」，PDF 块按原样透传。把解释器做成
-// 可覆盖，是为了在系统解释器可用、venv 不可用的镜像里仍能工作（本地调试）。
-var pdfPython = "python3"
+// CheckPDFRendering 在启动时核实渲染链是否真的可用，并返回一行人类可读的状态。
+// 调用方把它写进日志：渲染链的每一环都是「外部依赖」（解释器、模块、脚本文件），
+// 任何一环缺失都表现为「PDF 被原样透传、上游回 400」，与「请求本来就不含 PDF」
+// 无法区分。启动时的一行日志把这种静默失败变成显式事实——这正是 2026-10-16 那次
+// 上线事故的教训。
+func CheckPDFRendering() string {
+	if _, err := os.Stat(pdfToImagesScript); err != nil {
+		return "INDISPONIBLE (script absent: " + pdfToImagesScript + ") — les PDF seront transmis tels quels"
+	}
+	cmd := exec.Command(pdfPython, "-c", "import pymupdf")
+	if out, err := cmd.CombinedOutput(); err != nil {
+		msg := strings.TrimSpace(string(out))
+		if len(msg) > 120 {
+			msg = msg[:120]
+		}
+		return "INDISPONIBLE (" + pdfPython + " sans pymupdf: " + msg + ") — les PDF seront transmis tels quels"
+	}
+	return "actif (" + pdfPython + " + " + pdfToImagesScript + ")"
+}
+
+// pdfPython 执行渲染脚本的解释器。默认指向镜像里装有 PyMuPDF 的 venv
+// （Dockerfile 的 ENV WB2A_PDF_PYTHON 与此默认一致）。
+//
+// 为什么默认不能是 "python3"：系统解释器没有 PyMuPDF，脚本会以退出码 3 报告
+// 「pymupdf absent」，渲染静默失败，PDF 块被原样透传、上游回 400。这正是
+// 2026-10-16 首次上线时发生的事故（Dockerfile 的环境变量名与 Go 读取的名字不一致）。
+// 因此默认值直接指向 venv，并由 CheckPDFRendering 在启动时把真实状态写进日志。
+var pdfPython = "/opt/pdf/bin/python"
 
 // SetPDFPython 覆盖执行渲染脚本的解释器。
 func SetPDFPython(path string) { pdfPython = path }

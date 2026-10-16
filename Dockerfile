@@ -38,7 +38,10 @@ COPY scripts/probe_active.py /app/scripts/probe_active.py
 # 渲染脚本用 venv 的解释器（ENV 里的 PDF_PYTHON）执行；PDF_PYTHON=/usr/bin/python3
 # 可回退到系统解释器（无 pymupdf 时脚本会退出 3，PDF 块原样透传）。
 COPY scripts/pdf_to_images.py /app/scripts/pdf_to_images.py
-ENV PDF_PYTHON=/opt/pdf/bin/python
+ENV WB2A_PDF_PYTHON=/opt/pdf/bin/python
+# 与 Go 侧读取的变量名一致（WB2A_PDF_PYTHON，见 cmd/server/config.go 的
+# ConfigurePDFRendering）。首版曾写成 PDF_PYTHON，Go 读不到 → 回落系统解释器
+# （无 pymupdf）→ 渲染静默失败。启动日志现在会打印「rendu PDF: ...」以便一眼确认。
 RUN sed -i 's/\r$//' /app/login.sh /app/signin.sh /app/credit.sh && chmod 755 /app/login.sh /app/signin.sh /app/credit.sh
 # 镜像不带真实配置：落 example 作为默认（生产由挂载卷 /app/config.json 覆盖）
 COPY config.example.json /app/config.json

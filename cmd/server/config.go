@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -423,6 +424,7 @@ func Load(path string) (*Config, error) {
 		os.Getenv("WB2A_PDF_PYTHON"),
 		os.Getenv("WB2A_PDF_SCRIPT"),
 	)
+	log.Printf("rendu PDF: %s", upstream.CheckPDFRendering())
 	if err := c.normalize(); err != nil {
 		return nil, err
 	}
