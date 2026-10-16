@@ -466,9 +466,13 @@ func main() {
 		Handler:           h,
 		ReadHeaderTimeout: 30 * time.Second,
 		// ReadTimeout 覆盖整个请求读取（含 body）：防慢速 body 拖死连接。
-		// 请求体已无网关侧上限（max_body_mb 移除），60s 按常规带宽的数十 MB
-		// 上传余量取值；超大 body 慢速上传若超时，由客户端重试。
-		ReadTimeout: 60 * time.Second,
+		// 2026-10-16 : 60s 常量改为可配置，默认 300s。60s 的旧值按「常规带宽的数十 MB
+		// 上传余量」估算，但漏算了中转：Zeabur/Cloudflare 前置代理会再缓冲一次 body，
+		// 客户端侧的上传耗时被放大数倍。带 PDF/长文档的多模态请求因此在 body 传输中途
+		// 被掐断，表现为 io.ReadAll 失败 -> 400 "read body: ... i/o timeout"。
+		// 真正的护栏是 ReadHeaderTimeout（30s，未发送任何字节的连接仍被快速回收）；
+		// 读 body 超时属于传输层失败：不判罚账号、不轮转，但客户端看到的是失败。
+		ReadTimeout: time.Duration(cfg.ReadTimeoutSeconds) * time.Second,
 		// IdleTimeout keep-alive 空闲连接回收：配合 chat 出站 ctx 传播防连接泄漏堆积。
 		// 注意：SSE 流式响应期间连接非空闲，不受此项掐断；不设全局 WriteTimeout
 		// （长流式生成合法时长可达数分钟，全局 WriteTimeout 会误杀在途 SSE）。

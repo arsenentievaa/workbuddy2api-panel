@@ -27,6 +27,16 @@ type Config struct {
 	AuthDir     string `json:"auth_dir"`   // ./auths
 	StateFile   string `json:"state_file"` // ./data/state.json
 
+	// ReadTimeoutSeconds 入口 http.Server 的 ReadTimeout：覆盖**整个请求的读取**
+	// （含 body）。默认 300s（见 Default()）。
+	//
+	// 为什么需要它（2026-10-16）：旧值 60s 写死在 main.go，按「常规带宽的数十 MB
+	// 上传余量」估算，但漏算了中转——Zeabur/Cloudflare 前置代理会再缓冲一次 body，
+	// 客户端侧耗时被放大数倍。带 PDF/长文档的请求因此常在 body 传输中途被掐断，
+	// 客户端看到 400 "read body: ... i/o timeout"。慢速 body 的真实护栏是
+	// ReadHeaderTimeout（30s，写死在 main.go）；本项 ≤0 时回落默认。
+	ReadTimeoutSeconds int `json:"read_timeout_seconds"`
+
 	Cooldown struct {
 		// hard_credit / err_threshold / err_cooldown 三个历史键已退役：
 		// 硬冷却固定为次日 04:00（CooldownUntilTomorrow4AM），连续错误语义并入熔断器。
@@ -300,6 +310,8 @@ func Default() *Config {
 		APIKey:    "",
 		AuthDir:   "./auths",
 		StateFile: "./data/state.json",
+		// 入口读 body 上限：300s 覆盖经前置代理中转的大体积多模态上传。
+		ReadTimeoutSeconds: 300,
 	}
 	c.Cooldown.SoftRate = "600s"
 	c.Cooldown.SoftRateMax = "2h"
@@ -557,6 +569,11 @@ func applyEnv(c *Config) {
 
 func (c *Config) normalize() error {
 	var err error
+	// 入口读 body 上限：<=0（未设置或显式 0）回落默认 300s。旧 config 没有该键，
+	// 走 Default() 已置 300；此兜底覆盖直接构造 Config{} 的调用方与显式 0。
+	if c.ReadTimeoutSeconds <= 0 {
+		c.ReadTimeoutSeconds = 300
+	}
 	if c.SoftRateDur, err = time.ParseDuration(c.Cooldown.SoftRate); err != nil {
 		return fmt.Errorf("cooldown.soft_rate: %w", err)
 	}
