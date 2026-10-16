@@ -14,6 +14,7 @@ import (
 
 	"github.com/linguo2625469/workbuddy2api-panel/internal/fpdetect"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/prompt"
+	"github.com/linguo2625469/workbuddy2api-panel/internal/upstream"
 )
 
 // Config 顶层配置。
@@ -415,6 +416,13 @@ func Load(path string) (*Config, error) {
 		}
 	}
 	applyEnv(c)
+	// PDF -> images : chemins du rendu, surchargeables par variables d'environnement
+	// comme le reste de la configuration (mêmes préfixes WB2A_*, cohérence des
+	// déploiements). Le défaut vise le venv PyMuPDF de l'image Docker.
+	upstream.ConfigurePDFRendering(
+		os.Getenv("WB2A_PDF_PYTHON"),
+		os.Getenv("WB2A_PDF_SCRIPT"),
+	)
 	if err := c.normalize(); err != nil {
 		return nil, err
 	}
