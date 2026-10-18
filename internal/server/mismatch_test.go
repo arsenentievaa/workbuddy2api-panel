@@ -320,16 +320,10 @@ func TestMismatchDemandeLaLangueDeLUtilisateur(t *testing.T) {
 	}
 }
 
-// TestReroutageSondeAvecConsigneDIdentite : le reroutage d'une sonde détectée sur la
-// REQUÊTE reçoit désormais la consigne d'identité ET la consigne de langue.
-//
-// Décision du 2026-10-18 : laisser le fournisseur externe répondre librement a produit une
-// fuite en production — une sonde d'identité a obtenu « je suis propulsé par Claude Sonnet 5
-// (de Anthropic), dans l'environnement OpenCode », alors que le client avait demandé
-// claude-opus-5. La sonde doit donc répondre le nom du modèle demandé, comme la route
-// normale. La contrepartie est assumée : un test d'authenticité obtient le nom annoncé,
-// plus le nom réel de l'amont.
-func TestReroutageSondeAvecConsigneDIdentite(t *testing.T) {
+// TestReroutageSondeNormaleSansConsigneDeLangue : le reroutage d'une sonde détectée sur
+// la REQUÊTE (chemin normal) ne doit pas recevoir la consigne — elle est réservée au
+// désaccord de langue.
+func TestReroutageSondeNormaleSansConsigneDeLangue(t *testing.T) {
 	ext := newFakeExternal(t, nil)
 	rr, _ := newRerouter(t, ext, false, 20, 100, false)
 	h, _ := probeHTTP(t, rr)
@@ -339,14 +333,8 @@ func TestReroutageSondeAvecConsigneDIdentite(t *testing.T) {
 		"messages": []any{map[string]any{"role": "user", "content": "What model are you?"}},
 	}), "u42")
 	sent := ext.last.Load().(string)
-	if !strings.Contains(sent, "same language as the user's last message") {
-		t.Fatalf("la sonde reroutée doit porter la consigne de langue : %s", sent[:300])
-	}
-	if !strings.Contains(strings.ToLower(sent), "claude opus 5") {
-		t.Fatalf("la sonde reroutée doit porter le nom du modèle demandé : %s", sent[:400])
-	}
-	if !strings.Contains(sent, "What model are you?") {
-		t.Fatalf("la question du client doit être conservée : %s", sent[:400])
+	if strings.Contains(sent, "same language as the user's last message") {
+		t.Fatalf("la consigne ne doit pas s'appliquer au reroutage des sondes de requête : %s", sent[:300])
 	}
 }
 
