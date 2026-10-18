@@ -337,6 +337,9 @@ func main() {
 
 	// Reroutage des sondes vers l'upstream externe (phase 2).
 	var rerouter *server.Rerouter
+	if !cfg.FPRoute.Enabled {
+		log.Printf("[fp] REROUTAGE INACTIF : fp_route.enabled = false dans la configuration")
+	}
 	if cfg.FPRoute.Enabled {
 		key, kerr := upstream.LoadExternalAPIKey(cfg.FPRoute.APIKeyFile, cfg.FPRoute.APIKey)
 		if kerr != nil {
@@ -348,6 +351,8 @@ func main() {
 			notifier.Send(alert.KeyRerouteError, "⚠️ fp_route activé mais aucune clé d'upstream externe n'est lisible : le reroutage est DÉSACTIVÉ. Les sondes restent sur WorkBuddy.")
 		} else {
 			healthTTL := time.Duration(cfg.FPRoute.HealthTTLSeconds) * time.Second
+			log.Printf("[fp] ETAT DU REROUTAGE : actif, cible=%s, seuil=%.1f, honeypot=%d, plafond=%d/h",
+				cfg.FPRoute.BaseURL, cfg.FPObserve.Threshold, 3, cfg.FPRoute.MaxPerHourTotal)
 			rerouter = &server.Rerouter{
 				Enabled: true,
 				DryRun:  cfg.FPObserve.DryRun,
