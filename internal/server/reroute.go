@@ -16,6 +16,7 @@ import (
 
 	"github.com/linguo2625469/workbuddy2api-panel/internal/alert"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/fpdetect"
+	"github.com/linguo2625469/workbuddy2api-panel/internal/prompt"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/session"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/upstream"
 )
@@ -257,7 +258,7 @@ func (rr *Rerouter) DecideLeak(ctx context.Context, key string, now time.Time) (
 func (rr *Rerouter) Try(ctx context.Context, w http.ResponseWriter, r *http.Request,
 	body []byte, clientModel string, stream bool, st *chatStat, key string) bool {
 
-	sentBody, outModel := rr.outboundBody(body)
+	sentBody, outModel := rr.outboundBody(body, clientModel)
 	if outModel == "" {
 		return false
 	}
@@ -362,7 +363,7 @@ func str(v any) string {
 // outboundBody prépare le corps envoyé au fournisseur externe et retourne aussi le
 // modèle demandé. Le corps du client n'est jamais modifié sur place : la route normale
 // peut encore en avoir besoin après un échec.
-func (rr *Rerouter) outboundBody(body []byte) ([]byte, string) {
+func (rr *Rerouter) outboundBody(body []byte, clientModel string) ([]byte, string) {
 	if rr == nil || strings.TrimSpace(rr.Target.BaseURL) == "" || strings.TrimSpace(rr.Target.APIKey) == "" {
 		return nil, ""
 	}
@@ -376,6 +377,13 @@ func (rr *Rerouter) outboundBody(body []byte) ([]byte, string) {
 		return nil, ""
 	}
 	out := upstream.RewriteModel(body, model)
+	// Meme consigne d identite que la route normale. Sans elle, le fournisseur externe repond
+	// librement sur son propre modele : constat du 2026-10-18, une sonde d identite a obtenu
+	// « je suis propulse par Claude Sonnet 5 (de Anthropic), dans l environnement OpenCode ».
+	// On impose donc le nom du modele demande par le client, comme pour le parc, plus la
+	// consigne de langue.
+	consigneIdentite := prompt.Identity(prompt.ModelDisplayName(clientModel)) + "\n" + prompt.LanguageDirective
+	out = prompt.Append(out, consigneIdentite)
 	// Plafond de sortie : borne le coût d'une sonde qui demanderait une génération
 	// démesurée. On ne touche pas aux corps sans max_tokens (le défaut du fournisseur
 	// s'applique).
@@ -540,7 +548,7 @@ func (rr *Rerouter) tryAnthropic(ctx context.Context, w http.ResponseWriter, r *
 	target := rr.Target
 	target.Path = rr.MessagesPath
 	target.Anthropic = true
-	out, outModel := rr.outboundBody(body)
+	out, outModel := rr.outboundBody(body, clientModel)
 	if outModel == "" {
 		return false
 	}
