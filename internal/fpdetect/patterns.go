@@ -384,6 +384,24 @@ var modelIdentityPhrases = []string{
 // connaissance du modèle. Signal FORT (SigCutoffExplicit) : même une question
 // légitime sur les limites du modèle trahit le plus souvent une sonde d'empreinte.
 var cutoffPhrases = []string{
+	// --- Ajouts du 2026-10-18 : tournures multilingues manquantes ---
+	"quelle est ta date de cutoff",
+	"quelle est ta date de coupure",
+	"quelle est ta date de connaissance",
+	"jusqu'a quand tes connaissances",
+	"quand as-tu ete entraine",
+	"quand as-tu été entraîné",
+	"date de fin d'entrainement",
+	"fecha de corte de conocimiento",
+	"fecha limite de conocimiento",
+	"hasta cuando estas entrenado",
+	"wann endet dein wissen",
+	"wissensstand datum",
+	"bis wann wurdest du trainiert",
+	"data de corte de conhecimento",
+	"até quando você foi treinado",
+	"data limite delle conoscenze",
+	"fino a quando sei stato addestrato",
 	// --- Anglais ---
 	"cutoff date",
 	"knowledge cutoff",

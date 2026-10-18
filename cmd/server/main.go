@@ -351,6 +351,8 @@ func main() {
 			rerouter = &server.Rerouter{
 				Enabled: true,
 				DryRun:  cfg.FPObserve.DryRun,
+				// Trois premiers échanges servis par le fournisseur externe.
+				HoneypotTurns: 3,
 				Target: upstream.ExternalTarget{
 					BaseURL: cfg.FPRoute.BaseURL,
 					Path:    cfg.FPRoute.Path,

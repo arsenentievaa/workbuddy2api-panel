@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -30,6 +31,9 @@ const (
 	SigToolCount         = "tool_count"
 	SigThinkingRequest   = "thinking_request"
 	SigSSEShape          = "sse_shape"
+	SigRandomNumbers     = "random_numbers"
+	SigJuicePattern      = "juice_pattern"
+	SigOutputProbe       = "output_probe"
 	SigCodingLike        = "coding_like"
 	SigLongConversation  = "long_conversation"
 	// SigLanguageMismatch est le seul signal calculé sur la RÉPONSE (voir
@@ -43,6 +47,9 @@ const (
 // volontaire, sinon un test PDF contenant un bloc de code ne serait jamais routé.
 var defaultWeights = map[string]float64{
 	SigGlitchToken:    5.0,
+	SigRandomNumbers:  5.0,
+	SigJuicePattern:   3.0,
+	SigOutputProbe:    3.0,
 	SigModelQuestion:  5.0,
 	SigCutoffExplicit: 5.0,
 	// repetition_pattern reste FORT : il ne réagit qu'à une consigne chiffrée
@@ -133,6 +140,7 @@ const corroborationWeakMin = 2
 // étendu.
 var defaultStrong = []string{
 	SigGlitchToken, SigModelQuestion, SigCutoffExplicit, SigRepetitionPattern,
+	SigRandomNumbers,
 	SigRepeatRequest, SigMassRepetition, SigToolSuspicious, SigToolCountExtreme,
 	SigPDFContent, SigRepeatedLines, SigToolGenericName, SigLanguageMismatch,
 }
@@ -163,6 +171,10 @@ var defaultStrong = []string{
 // Ils restent OBSERVÉS (visibles dans /status) mais ne décident plus rien.
 var defaultAuthenticity = []string{
 	SigModelQuestion, SigGlitchToken, SigCutoffExplicit, SigRepetitionPattern,
+	// Ajouts du 2026-10-18 : une demande de nombres aléatoires est la méthode
+	// canonique de test de distribution ; le motif « juice » sur contexte très long
+	// est une sonde de contexte. Les deux routent seuls vers le vrai Claude.
+	SigRandomNumbers, SigJuicePattern,
 }
 
 // DefaultAuthenticitySignals : copie de la liste d'authenticité, pour l'exposer dans
@@ -596,6 +608,25 @@ func (d *Detector) AnalyzeAt(body []byte, clientKey string, now time.Time) Resul
 		if n := d.state.Observe(clientKey, h, now); n >= d.cfg.RepeatCount {
 			add(SigRepeatRequest, fmt.Sprintf("%d requêtes identiques", n))
 		}
+	}
+
+	// 13) Nombres aléatoires : méthode « LM fingerprint » — on demande une longue
+	// suite de nombres tirés au hasard et on compare la distribution. Aucun usage
+	// applicatif normal ne demande cela.
+	if sigRandomNumbersHelper(userLower) {
+		add(SigRandomNumbers, "demande de nombres aléatoires en série")
+	}
+
+	// 14) Motif « juice » sur un contexte très long : sonde de contexte.
+	if sigJuiceHelper(userLower, res.EstimatedTokens) {
+		add(SigJuicePattern, fmt.Sprintf("motif juice sur ~%d tokens", res.EstimatedTokens))
+	}
+
+	// 15) Sonde de forme de sortie : on exige un mot, un chiffre, une chaîne nue ou
+	// du JSON brut. Signal MOYEN : une consigne de format est banale en production,
+	// il ne route donc qu'accumulé.
+	if sigOutputProbeHelper(userLower) {
+		add(SigOutputProbe, "consigne de sortie minimale ou brute")
 	}
 
 	// Pénalités : indices de développement courant. Elles ne peuvent pas annuler un
@@ -1079,4 +1110,62 @@ func isCodingLike(raw map[string]any, user string) bool {
 		}
 	}
 	return codingHintRe.MatchString(user)
+}
+
+// --- Détecteurs ajoutés le 2026-10-18 (demande exploitant) ---
+
+// sigRandomNumbersHelper : demande explicite de nombres aléatoires en série.
+// Deux formes : consigne (« écris 300 nombres au hasard entre 1 et 355 ») ou
+// longue suite de nombres déjà présente dans le texte.
+func sigRandomNumbersHelper(lower string) bool {
+	amorce := []string{"random", "aléatoire", "aleatoire", "zufällig", "zufallig",
+		"aleatorio", "casuale", "случайн", "hasard"}
+	trouve := false
+	for _, a := range amorce {
+		if strings.Contains(lower, a) {
+			trouve = true
+			break
+		}
+	}
+	if trouve {
+		// il faut aussi une quantité : « entre 1 et 355 », « 300 nombres »
+		for _, champ := range strings.Fields(lower) {
+			n, err := strconv.Atoi(strings.Trim(champ, ".,;:()[]{}\"'"))
+			if err == nil && n >= 20 {
+				return true
+			}
+		}
+	}
+	// longue suite de nombres (au moins 40) dans le texte
+	compteur := 0
+	for _, champ := range strings.Fields(lower) {
+		if _, err := strconv.Atoi(strings.Trim(champ, ".,;:")); err == nil {
+			compteur++
+			if compteur >= 40 {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// sigJuiceHelper : mot-clé « juice » porté par un contexte très long.
+func sigJuiceHelper(lower string, tokens int) bool {
+	if tokens < 20000 {
+		return false
+	}
+	return strings.Contains(lower, "juice")
+}
+
+// sigOutputProbeHelper : consigne de sortie minimale ou brute.
+func sigOutputProbeHelper(lower string) bool {
+	phrases := []string{
+		"réponds uniquement", "reponds uniquement", "réponds seulement", "reponds seulement",
+		"réponds par un seul", "un seul mot", "un seul chiffre", "juste le chiffre",
+		"answer only", "reply only", "reply with only", "just the number",
+		"one word answer", "single word", "only the word", "only the number",
+		"raw json", "json brut", "json only", "pure json",
+		"respond only", "say only", "output only",
+	}
+	return hitContains(lower, phrases)
 }

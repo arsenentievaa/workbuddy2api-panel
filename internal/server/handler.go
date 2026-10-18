@@ -746,6 +746,17 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	// réécrite pour CodeBuddy, et surtout ce chemin ne doit consommer ni quota de
 	// compte, ni place dans le pool, ni liaison de session. Si le reroutage échoue, on
 	// poursuit simplement vers la boucle de comptes ci-dessous (fail-open).
+	// Stratégie honeypot : les premiers échanges d'une conversation sont servis par le
+	// fournisseur externe, pour que la première impression soit celle d'un vrai Claude.
+	// Exclu pour le code (un client qui commence par une tâche ne doit pas coûter cher)
+	// et pour les relances de fuite.
+	if !fpIsProbe && !fpResult.CodingLike && !h.isLeakRetry(r) && h.cfg.Rerouter != nil &&
+		h.cfg.Rerouter.Enabled && h.cfg.Rerouter.HoneypotTurns > 0 &&
+		userTurns(body) > 0 && userTurns(body) <= h.cfg.Rerouter.HoneypotTurns {
+		fpIsProbe = true
+		log.Printf("[fp] honeypot : échange %d/%d servi par le fournisseur externe", userTurns(body), h.cfg.Rerouter.HoneypotTurns)
+	}
+
 	if fpIsProbe && !h.isLeakRetry(r) && h.cfg.Rerouter != nil && h.cfg.Rerouter.Enabled {
 		if h.tryReroute(w, r, body, clientModel, peek.Stream, st) {
 			return

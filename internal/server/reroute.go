@@ -64,6 +64,12 @@ type Rerouter struct {
 	// ModelDefault : modèle demandé au fournisseur externe quand la requête n'en
 	// nomme pas un qu'il connaît.
 	ModelDefault string
+	// HoneypotTurns : nombre de premiers échanges d'une conversation à servir par le
+	// fournisseur externe (vrai Claude), pour que la première impression soit la
+	// bonne. 0 désactive le stratagème. Les requêtes de code en sont exclues : un
+	// client qui commence par une tâche de développement ne doit pas coûter cher.
+	HoneypotTurns int
+
 	// ModelPrefixes : préfixes de modèles que l'on transmet tels quels (le client a
 	// demandé un modèle réel du fournisseur). Hors de ces préfixes, on substitue
 	// ModelDefault — un nom de modèle CodeBuddy n'existe pas chez le fournisseur.
@@ -744,4 +750,24 @@ func (h *Handler) tryReroute(w http.ResponseWriter, r *http.Request, body []byte
 	}
 	st.route = "crazy"
 	return rr.Try(r.Context(), w, r, body, clientModel, stream, st, key)
+}
+
+// userTurns compte les messages « user » du corps : c'est le numéro de l'échange en
+// cours. Le corps est déjà en mémoire (peek), aucune lecture supplémentaire.
+func userTurns(body []byte) int {
+	var doc struct {
+		Messages []struct {
+			Role string `json:"role"`
+		} `json:"messages"`
+	}
+	if err := json.Unmarshal(body, &doc); err != nil {
+		return 0
+	}
+	n := 0
+	for _, m := range doc.Messages {
+		if m.Role == "user" {
+			n++
+		}
+	}
+	return n
 }
