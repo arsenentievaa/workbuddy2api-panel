@@ -130,21 +130,23 @@ func (h *Handler) rerouteOnMismatch(w http.ResponseWriter, r *http.Request, body
 		return false
 	}
 
-	// Le budget est consommé UNE fois pour les deux remèdes (parc puis fournisseur) : le
-	// compter deux fois épuiserait le plafond deux fois plus vite que voulu.
-	budgetOK, budgetReason := true, ""
-	if rr.Stats != nil {
-		budgetOK, budgetReason = rr.Stats.AllowLeakReroute(key, now)
-	}
-
-	// 1) REMÈDE PAR LE PARC : rejouer la requête avec la consigne de langue. Indépendant du
-	//    fournisseur externe — mesuré le 2026-10-05 : 46 fuites sur 46 subies parce que ce
-	//    fournisseur était à sec (403 Insufficient balance), aucun remède appliqué.
-	if budgetOK && h.replayOnPool(w, r, body, clientModel, stream, st) {
+	// 1) REMÈDE PAR LE PARC, HORS BUDGET : rejouer la requête avec la consigne de langue.
+	//    Le budget anti-abus (5/h par client, 30/h au total) borne la dépense vers le
+	//    FOURNISSEUR EXTERNE ; il ne doit pas s'appliquer à un rejeu interne, qui ne coûte
+	//    qu'un appel de parc. Constaté le 2026-10-20 : il s'appliquait aux deux, si bien que
+	//    527 désaccords détectés donnaient 10 remèdes et 511 fuites subies par le client
+	//    (97 %) — le plafond était épuisé en permanence (over_cap 511).
+	if h.replayOnPool(w, r, body, clientModel, stream, st) {
 		if h.cfg.FPStats != nil {
 			h.cfg.FPStats.NoteMismatchRerouted()
 		}
 		return true
+	}
+
+	// Le budget ne couvre donc plus que le remède payant, et il est consulté ICI.
+	budgetOK, budgetReason := true, ""
+	if rr.Stats != nil {
+		budgetOK, budgetReason = rr.Stats.AllowLeakReroute(key, now)
 	}
 
 	// 2) REMÈDE PAR LE FOURNISSEUR EXTERNE (chemin historique). La santé de ce fournisseur est

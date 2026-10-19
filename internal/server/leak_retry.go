@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
 	"io"
 	"log"
 	"net"
@@ -127,6 +128,45 @@ func (h *Handler) replayOnPool(w http.ResponseWriter, r *http.Request, body []by
 		return false
 	}
 
+	// VERIFICATION DU REJEU : rien n'a encore été écrit au client. Une réponse rejouée qui
+	// serait ENCORE dans la mauvaise langue ne vaut pas mieux que l'originale — la servir
+	// priverait le chemin payant (fournisseur externe) de sa chance tout en comptant un
+	// remède qui n'en est pas un. On rend donc la main sans rien écrire : le client garde
+	// sa réponse d'origine et l'appelant poursuit vers l'étape suivante.
+	//
+	// Constaté le 2026-10-20 : sans cette vérification, le compteur `rerouted` comptait des
+	// rejeux restés en chinois comme des remèdes réussis (527 désaccords, 10 « remèdes »,
+	// aucun moyen de savoir combien avaient réellement changé la langue).
+	var prefix []byte
+	var rest io.Reader
+	if stream {
+		prefix, rest = sniffStreamPrefix(resp.Body)
+		if h.cfg.FPDetect != nil {
+			if res := h.cfg.FPDetect.AnalyzeStreamPrefix(body, prefix); res.Route {
+				log.Printf("[fp] remède par le parc : le rejeu repart en CJK (%s) -> repli", res.Explain())
+				st.route = ""
+				return false
+			}
+		}
+	} else {
+		data, rerr := io.ReadAll(resp.Body)
+		if rerr != nil {
+			log.Printf("[fp] remède par le parc : lecture interrompue (%v) -> repli", rerr)
+			return false
+		}
+		if h.cfg.FPDetect != nil {
+			var parsed map[string]any
+			if json.Unmarshal(data, &parsed) == nil {
+				if res := h.cfg.FPDetect.AnalyzeResponse(body, completionText(parsed)); res.Route {
+					log.Printf("[fp] remède par le parc : le rejeu repart en CJK (%s) -> repli", res.Explain())
+					st.route = ""
+					return false
+				}
+			}
+		}
+		prefix = data
+	}
+
 	if ct := resp.Header.Get("Content-Type"); ct != "" {
 		w.Header().Set("Content-Type", ct)
 	}
@@ -134,13 +174,16 @@ func (h *Handler) replayOnPool(w http.ResponseWriter, r *http.Request, body []by
 
 	var copyErr error
 	if stream {
-		if fl, ok := w.(http.Flusher); ok {
-			_, copyErr = io.Copy(&flushWriter{w: w, fl: fl}, resp.Body)
+		if _, err := w.Write(prefix); err != nil {
+			copyErr = err
+		} else if fl, ok := w.(http.Flusher); ok {
+			fl.Flush()
+			_, copyErr = io.Copy(&flushWriter{w: w, fl: fl}, rest)
 		} else {
-			_, copyErr = io.Copy(w, resp.Body)
+			_, copyErr = io.Copy(w, rest)
 		}
 	} else {
-		_, copyErr = io.Copy(w, resp.Body)
+		_, copyErr = w.Write(prefix)
 	}
 	if copyErr != nil {
 		// Le client a déjà reçu des octets : on ne peut plus rien basculer, on le signale.
