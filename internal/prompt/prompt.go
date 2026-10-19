@@ -37,8 +37,23 @@ const Degraded = "You are a helpful assistant. Respond in the user's language, f
 //
 // Elle n'est PAS ajoutée au trafic normal : le prompt système est une décision produit
 // (anti-empreinte) et cette directive ne doit pas la modifier.
-const LanguageDirective = "Always answer in the same language as the user's last message. " +
-	"Do not switch to another language on your own, whatever the language of these instructions."
+const LanguageDirective = LanguageGuard
+
+// LanguageGuard est LA consigne de langue, appliquée à tout envoi vers le parc (et non
+// seulement aux rejeux de remède).
+//
+// Pourquoi partout : le prompt système par défaut de la passerelle est en chinois, donc
+// une demande SANS indice de langue — « [1, 2, 3] », « OK », un résultat d'outil, une
+// suite de chiffres — reçoit une réponse chinoise alors que le client parle français ou
+// anglais. Mesuré en production le 2026-10-20 : ce cas produisait la quasi-totalité des
+// réponses chinoises détectées (527 en quinze heures, dont 511 servies au client). Le
+// remède après coup ne suffisait pas : son rejeu repartait en chinois, faute de langue
+// de référence. La consigne, elle, tranche explicitement, y compris quand la demande
+// n'est pas du langage naturel.
+const LanguageGuard = "Always answer in the same language as the user's messages. " +
+	"If those messages contain no natural language (for example only code, data, symbols or a bare word), answer in English. " +
+	"Never answer in Chinese unless the user wrote in Chinese."
+
 
 // ModelDisplayName 把 Claude 模型 ID 转成人读的名字：
 //

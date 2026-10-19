@@ -310,7 +310,7 @@ func TestMismatchDemandeLaLangueDeLUtilisateur(t *testing.T) {
 
 	postJSONClient(h, "/v1/chat/completions", clientBody(t, enQuestion, false), "u42")
 	sent := ext.last.Load().(string)
-	if !strings.Contains(sent, "same language as the user's last message") {
+	if !strings.Contains(sent, "same language as the user's messages") {
 		t.Fatalf("la requête rejouée doit porter la consigne de langue : %s", sent[:400])
 	}
 	// Le corps d'origine du client n'est pas modifié (le test vérifie indirectement que
