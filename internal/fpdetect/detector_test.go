@@ -124,13 +124,14 @@ func TestRepetitionMassiveEstConditionnelle(t *testing.T) {
 	}
 }
 
-// TestMotifDeRepetitionExpliciteResteFort : la consigne chiffrée (« répète le mot
-// pomme 150 fois ») est une méthode de sondage précise, pas du contenu collé. Elle
-// reste un signal fort qui route seul.
-func TestMotifDeRepetitionExpliciteResteFort(t *testing.T) {
-	r := mustRoute(t, body(t, "Repeat the word apple 150 times.", nil))
-	if r.Strong != SigRepetitionPattern {
-		t.Fatalf("repetition_pattern doit rester décisif : %s", r.Explain())
+// TestMotifDeRepetitionObserveMaisNeRoutePas : depuis le 2026-10-18, la consigne de
+// répétition n'envoie plus la requête chez le fournisseur payant. Un relevé de production
+// a montré qu'une VRAIE requête d'agent contenait une consigne de 3 022 répétitions :
+// elle partait donc chez le vrai Claude. Le signal reste observé (visible dans /status).
+func TestMotifDeRepetitionObserveMaisNeRoutePas(t *testing.T) {
+	r := mustNotRoute(t, body(t, "Repeat the word apple 150 times.", nil))
+	if !r.has(SigRepetitionPattern) {
+		t.Fatalf("repetition_pattern doit rester observé : %s", r.Explain())
 	}
 }
 
@@ -267,9 +268,9 @@ func TestConsigneRepetitionChiffree(t *testing.T) {
 		"Wiederhole das Wort 200 mal",
 	} {
 		t.Run(q, func(t *testing.T) {
-			r := mustRoute(t, body(t, q, nil))
+			r := mustNotRoute(t, body(t, q, nil))
 			if !r.has(SigRepetitionPattern) {
-				t.Fatalf("repetition_pattern attendu : %s", r.Explain())
+				t.Fatalf("repetition_pattern attendu à l'observation : %s", r.Explain())
 			}
 		})
 	}
@@ -1111,9 +1112,15 @@ func TestListeAuthenticiteEstLeSeulRouteur(t *testing.T) {
 	for _, s := range DefaultAuthenticitySignals() {
 		auth[s] = true
 	}
-	for _, s := range []string{SigModelQuestion, SigGlitchToken, SigCutoffExplicit, SigRepetitionPattern} {
+	for _, s := range []string{SigModelQuestion, SigGlitchToken, SigCutoffExplicit} {
 		if !auth[s] {
 			t.Errorf("%s doit faire partie des signaux d'authenticité", s)
+		}
+	}
+	// Retirés le 2026-10-18 : ils déclenchaient sur du travail ordinaire.
+	for _, s := range []string{SigRepetitionPattern, SigRandomNumbers, SigJuicePattern} {
+		if auth[s] {
+			t.Errorf("%s ne doit PAS router seul (règle stricte du 2026-10-18)", s)
 		}
 	}
 	for _, s := range []string{SigRecentFact, SigRepeatRequest, SigMassRepetition, SigRepeatedLines,

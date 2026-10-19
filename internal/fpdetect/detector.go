@@ -170,11 +170,18 @@ var defaultStrong = []string{
 // signaux envoyaient chez le vrai Claude des clients qui écrivaient simplement du code.
 // Ils restent OBSERVÉS (visibles dans /status) mais ne décident plus rien.
 var defaultAuthenticity = []string{
-	SigModelQuestion, SigGlitchToken, SigCutoffExplicit, SigRepetitionPattern,
-	// Ajouts du 2026-10-18 : une demande de nombres aléatoires est la méthode
-	// canonique de test de distribution ; le motif « juice » sur contexte très long
-	// est une sonde de contexte. Les deux routent seuls vers le vrai Claude.
-	SigRandomNumbers, SigJuicePattern,
+	// Règle de l'exploitant (rappel du 2026-10-18) : SEULES les tentatives de vérifier qu'il
+	// s'agit bien d'un modèle Anthropic partent chez le fournisseur externe. Tout le reste,
+	// y compris les tâches de développement, doit rester sur le parc.
+	//
+	// Ont été retirés de cette liste le 2026-10-18, après un relevé de production qui montrait
+	// un recours massif au fournisseur payant :
+	//   - repetition_pattern : une consigne de 3 022 répétitions, apparue dans une VRAIE requête
+	//     d'agent, était comptée comme une sonde ;
+	//   - random_numbers et juice_pattern : le mot « random » et un nombre suffisent à déclencher,
+	//     ce qu'on trouve dans du travail ordinaire.
+	// Ils restent OBSERVÉS (visibles dans /status) mais ne décident plus du routage.
+	SigModelQuestion, SigGlitchToken, SigCutoffExplicit,
 }
 
 // DefaultAuthenticitySignals : copie de la liste d'authenticité, pour l'exposer dans

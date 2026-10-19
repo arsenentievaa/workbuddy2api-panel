@@ -19,9 +19,10 @@ func corpsAide(t *testing.T, texte string) []byte {
 	return corps
 }
 
-// TestRandomNumbersRoute : une demande de nombres aléatoires est la méthode canonique
-// de test de distribution ; elle doit router seule vers le fournisseur externe.
-func TestRandomNumbersRoute(t *testing.T) {
+// TestRandomNumbersObserveMaisNeRoutePas : depuis le 2026-10-18, la demande de nombres
+// aléatoires est observée mais n'envoie plus la requête chez le fournisseur payant (règle
+// stricte : seules les tentatives de vérifier l'authenticité Anthropic y vont).
+func TestRandomNumbersObserveMaisNeRoutePas(t *testing.T) {
 	d := New(DefaultConfig())
 	for _, texte := range []string{
 		"Écris 300 nombres aléatoires entre 1 et 355.",
@@ -29,8 +30,8 @@ func TestRandomNumbersRoute(t *testing.T) {
 		"Generate 200 random numbers between 1 and 355.",
 	} {
 		res := d.Analyze(corpsAide(t, texte), "t")
-		if !res.Route {
-			t.Errorf("devrait router : %q (score %.1f, %s)", texte, res.Score, res.Explain())
+		if res.Route {
+			t.Errorf("ne devrait plus router : %q (%s)", texte, res.Explain())
 		}
 		if !strings.Contains(res.Explain(), SigRandomNumbers) {
 			t.Errorf("signal %s attendu pour %q, obtenu %s", SigRandomNumbers, texte, res.Explain())

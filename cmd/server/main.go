@@ -357,7 +357,7 @@ func main() {
 				Enabled: true,
 				DryRun:  cfg.FPObserve.DryRun,
 				// Trois premiers échanges servis par le fournisseur externe.
-				HoneypotTurns: 3,
+				HoneypotTurns: 0, // honeypot désactivé : il envoyait les 3 premiers échanges de CHAQUE conversation chez le fournisseur payant
 				Target: upstream.ExternalTarget{
 					BaseURL: cfg.FPRoute.BaseURL,
 					Path:    cfg.FPRoute.Path,
