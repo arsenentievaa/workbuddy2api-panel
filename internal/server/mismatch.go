@@ -40,8 +40,12 @@ import (
 // façon pour voir du texte ; on n'ajoute pas de latence perceptible, mais on renonce à
 // transmettre la trame « role: assistant » seule.
 const (
-	streamSniffMaxBytes  = 64 << 10
-	streamSniffMaxFrames = 40
+	// Bornes larges : un modèle qui raisonne émet des centaines de trames internes avant
+	// la première trame de texte. Avec 40 trames, on relâchait l'inspection avant d'avoir
+	// vu le moindre texte visible — et la réponse chinoise passait (constaté le
+	// 2026-10-20 sur le message « go » en flux).
+	streamSniffMaxBytes  = 1 << 20
+	streamSniffMaxFrames = 400
 
 	// Seuils de décision du préfixe : deux caractères CJK visibles suffisent à conclure
 	// (réponse chinoise, y compris brève), sinon il faut assez de lettres latines pour
@@ -55,7 +59,7 @@ const (
 	// quel. Le client ne voit de toute façon rien tant que le modèle n'a pas commencé à
 	// répondre ; cette borne évite qu'un long raisonnement interne retarde la première
 	// écriture.
-	streamSniffMaxWait = 4 * time.Second
+	streamSniffMaxWait = 20 * time.Second
 )
 
 // sniffStreamPrefix lit le début d'un flux SSE et retourne le préfixe consommé ainsi
