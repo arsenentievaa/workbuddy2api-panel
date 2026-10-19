@@ -166,11 +166,16 @@ func TestMismatchFailOpenConserveLaReponse(t *testing.T) {
 	h, _ := mismatchHandler(t, ext, sseWithContent(zhAnswer))
 
 	rec := postJSONClient(h, "/v1/chat/completions", clientBody(t, enQuestion, false), "u42")
-	if rec.Code != 200 {
-		t.Fatalf("le client doit être servi malgré la panne : code=%d", rec.Code)
+	// Règle du 2026-10-20 : plus aucune reprise possible -> la réponse chinoise n'est PAS
+	// servie, le client reçoit une erreur relançable.
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("une erreur est attendue (pas de réponse chinoise servie) : code=%d", rec.Code)
 	}
-	if !strings.Contains(rec.Body.String(), "巴黎") {
-		t.Fatalf("la réponse d'origine doit être servie : %s", rec.Body.String()[:200])
+	if strings.Contains(rec.Body.String(), "巴黎") {
+		t.Fatalf("la réponse chinoise ne doit pas atteindre le client : %s", rec.Body.String()[:200])
+	}
+	if !strings.Contains(rec.Body.String(), "language_guard") {
+		t.Fatalf("l'erreur doit être explicite : %s", rec.Body.String()[:200])
 	}
 	lm := mismatchCounters(h)
 	if lm["detected"] != 1 || lm["rerouted"] != 0 || lm["kept"] != 1 {
@@ -416,12 +421,15 @@ func TestFuiteDeLangueRefuseeCompte(t *testing.T) {
 	rr.Stats.AllowLeakReroute("autre", time.Now())
 
 	rec := postJSONClient(h, "/v1/chat/completions", clientBody(t, enQuestion, false), "u42")
-	if !strings.Contains(rec.Body.String(), "巴黎") {
-		t.Fatalf("la réponse incohérente doit être servie (remède refusé) : %s", rec.Body.String()[:200])
+	if strings.Contains(rec.Body.String(), "巴黎") {
+		t.Fatalf("la réponse incohérente ne doit plus être servie : %s", rec.Body.String()[:200])
+	}
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("une erreur relançable est attendue : code=%d", rec.Code)
 	}
 	lm := mismatchCounters(h)
 	if lm["kept"] != 1 || lm["rerouted"] != 0 {
-		t.Fatalf("un refus de budget doit compter comme fuite subie : %v", lm)
+		t.Fatalf("un refus de budget doit compter comme fuite écartée : %v", lm)
 	}
 	if n := ext.callCount(); n != 0 {
 		t.Fatalf("aucun appel externe attendu (budget épuisé) : %d", n)

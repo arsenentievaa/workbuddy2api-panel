@@ -26,12 +26,15 @@ func TestRemedeExterneEncoreChinoisNEstPasServi(t *testing.T) {
 	h, _ := mismatchHandler(t, ext, sseWithContent(zhAnswer))
 
 	rec := postJSONClient(h, "/v1/chat/completions", clientBody(t, enQuestion, false), "u42")
-	if strings.Contains(rec.Body.String(), "巴黎") == false {
-		t.Fatalf("le remède ayant échoué, la réponse d'origine doit être servie : %s", rec.Body.String()[:200])
+	if strings.Contains(rec.Body.String(), "巴黎") {
+		t.Fatalf("la réponse chinoise ne doit jamais être servie : %s", rec.Body.String()[:200])
+	}
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("une erreur relançable est attendue : code=%d", rec.Code)
 	}
 	lm := mismatchCounters(h)
 	if lm["kept"] != 1 {
-		t.Fatalf("une fuite subie doit être comptée : %v", lm)
+		t.Fatalf("une fuite écartée doit être comptée : %v", lm)
 	}
 }
 

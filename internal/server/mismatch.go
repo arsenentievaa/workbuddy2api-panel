@@ -195,15 +195,18 @@ func (h *Handler) rerouteOnMismatch(w http.ResponseWriter, r *http.Request, body
 		allowed, reason = false, reasonHealth
 	}
 	if !allowed {
-		// Refus (budget dédié atteint, upstream malsain) : le client garde bel et bien
-		// la réponse incohérente. C'est une fuite subie, donc elle compte au même titre
-		// qu'un échec d'appel — sinon l'alerte « kept > 0 » raterait précisément les
-		// pannes de fournisseur et les plafonds, c'est-à-dire les cas les plus probables.
+		// Refus (budget dédié atteint, upstream malsain) : plus aucune reprise n'est
+		// possible. La réponse chinoise n'est PAS servie (règle du 2026-10-20 : rien ne
+		// passe hors conversation réellement chinoise) — le client reçoit une erreur
+		// claire, qu'il peut relancer, au lieu d'un texte inutilisable.
 		if h.cfg.FPStats != nil {
 			h.cfg.FPStats.NoteMismatchKept(now)
 		}
-		log.Printf("[fp] désaccord de langue : remède refusé (%s) -> FUITE SUBIE par le client", reason)
-		return false
+		log.Printf("[fp] désaccord de langue : remède refusé (%s) -> réponse chinoise ÉCARTÉE, erreur renvoyée", reason)
+		writeOpenAIError(w, http.StatusBadGateway, "language_guard",
+			"the answer came back in an unexpected language; please retry")
+		st.status = http.StatusBadGateway
+		return true
 	}
 	st.route = "crazy"
 	// Le prompt système de la passerelle est en chinois : sans cette consigne, le
@@ -217,15 +220,18 @@ func (h *Handler) rerouteOnMismatch(w http.ResponseWriter, r *http.Request, body
 		}
 		return true
 	}
-	// L'upstream externe n'a pas répondu : on sert la réponse d'origine plutôt que rien.
-	// Elle est incohérente, mais c'est ce que le client serait de toute façon destiné à
-	// recevoir en cas de panne — et le signal reste compté et journalisé.
+	// Toutes les reprises ont échoué (parc normal, parc strict, fournisseur externe
+	// vérifié). La réponse chinoise n'est pas servie : une erreur claire vaut mieux qu'un
+	// texte que le client ne peut pas lire, et elle est relançable.
 	if h.cfg.FPStats != nil {
 		h.cfg.FPStats.NoteMismatchKept(now)
 	}
 	st.route = ""
-	log.Printf("[fp] désaccord de langue : reroutage impossible -> FUITE SUBIE par le client (réponse d'origine servie)")
-	return false
+	log.Printf("[fp] désaccord de langue : toutes les reprises échoué -> réponse chinoise ÉCARTÉE, erreur renvoyée")
+	writeOpenAIError(w, http.StatusBadGateway, "language_guard",
+		"the answer came back in an unexpected language; please retry")
+	st.status = http.StatusBadGateway
+	return true
 }
 
 // rerouteOnStreamMismatch : version flux, à partir du préfixe déjà lu.
