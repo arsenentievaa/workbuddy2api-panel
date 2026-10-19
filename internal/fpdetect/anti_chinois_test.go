@@ -135,3 +135,22 @@ func TestKanaHorsRegleCourte(t *testing.T) {
 		t.Fatal("la règle courte ne doit viser que le han")
 	}
 }
+
+// Un compte amont qui répond un objet JSON alors que le client a demandé un flux : le
+// texte doit être lu, sinon une réponse chinoise passe sans être vue.
+func TestFluxReponseJsonDetectee(t *testing.T) {
+	d := detecteur()
+	prefix := []byte(`{"id":"x","choices":[{"index":0,"message":{"role":"assistant","content":"你好！有什么可以帮你的？"},"finish_reason":"stop"}]}`)
+	if res := d.AnalyzeStreamPrefix(corps(t, "👋"), prefix); !res.Route {
+		t.Fatal("une réponse JSON chinoise sur le chemin du flux doit être détectée")
+	}
+}
+
+// Même chose en anglais : pas de faux positif.
+func TestFluxReponseJsonLatineNonDetectee(t *testing.T) {
+	d := detecteur()
+	prefix := []byte(`{"id":"x","choices":[{"index":0,"message":{"role":"assistant","content":"Hi! What are you working on?"},"finish_reason":"stop"}]}`)
+	if res := d.AnalyzeStreamPrefix(corps(t, "👋"), prefix); res.Route {
+		t.Fatal("une réponse JSON latine ne doit pas déclencher")
+	}
+}

@@ -294,6 +294,54 @@ func visibleStreamText(prefix []byte) string {
 			}
 		}
 	}
+	if b.Len() == 0 {
+		// Certains comptes amont répondent un OBJET JSON même quand le client demande un
+		// flux. Sans ce repli, le texte de la réponse n'était jamais lu — et une réponse
+		// chinoise passait sans être vue (constaté le 2026-10-20 sur « 👋 » en flux).
+		if txt := textFromJSONDocument(prefix); txt != "" {
+			return txt
+		}
+	}
+	return b.String()
+}
+
+// textFromJSONDocument : texte d'assistant d'une réponse JSON complète (hors SSE).
+func textFromJSONDocument(raw []byte) string {
+	var obj map[string]any
+	if err := json.Unmarshal(raw, &obj); err != nil {
+		return ""
+	}
+	var b strings.Builder
+	if choices, ok := obj["choices"].([]any); ok {
+		for _, ch := range choices {
+			m, ok := ch.(map[string]any)
+			if !ok {
+				continue
+			}
+			if msg, ok := m["message"].(map[string]any); ok {
+				if c, ok := msg["content"].(string); ok {
+					b.WriteString(c)
+				}
+			}
+			if c, ok := m["text"].(string); ok {
+				b.WriteString(c)
+			}
+		}
+	}
+	if content, ok := obj["content"].([]any); ok {
+		for _, part := range content {
+			if p, ok := part.(map[string]any); ok {
+				if t, ok := p["text"].(string); ok {
+					b.WriteString(t)
+				}
+			}
+		}
+	}
+	for _, key := range []string{"content", "text"} {
+		if c, ok := obj[key].(string); ok {
+			b.WriteString(c)
+		}
+	}
 	return b.String()
 }
 
