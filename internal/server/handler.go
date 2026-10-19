@@ -736,7 +736,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	// Ce qui est lu en dernier pese le plus : la consigne ferme donc le prompt, quelle que soit
 	// l'identite annoncee au client.
 	if systemPrompt != "" {
-		systemPrompt += "\n" + prompt.LanguageDirective
+		systemPrompt += "\n" + h.languageDirectiveFor(r)
 	}
 
 	// Reroutage d'une sonde vers l'upstream externe (phase 2).
@@ -1740,6 +1740,18 @@ func rotateBackoff(i int, ctx context.Context) bool {
 }
 
 // applyErrorPolicy 按错误分类对账号施加冷却/禁用/熔断策略（最终版状态机）。
+
+// languageDirectiveFor : consigne de langue à accrocher au prompt système. Un rejeu de
+// remède peut demander la consigne STRICTE (en-tête interne, secret du rejeu) : sans
+// cela, le second essai serait identique au premier puisque le mode custom réécrit le
+// prompt système et perdrait la consigne ajoutée au corps par l'appelant.
+func (h *Handler) languageDirectiveFor(r *http.Request) string {
+	if r != nil && h.isLeakRetry(r) && r.Header.Get(forceLangHeader) == forceLangStrict {
+		return prompt.LanguageStrict
+	}
+	return prompt.LanguageDirective
+}
+
 // kind 是唯一权威分类（来自 upstream.Classify / ChatStreamContext 的 *Error 信封），
 // 此处不再按原始 status 二次判断。仅在 chatCompletions 轮转循环内调用：内容拦截
 // 会立即 400 返回，其余种类 continue 换号（continue 前由 rotateBackoff 退避）。

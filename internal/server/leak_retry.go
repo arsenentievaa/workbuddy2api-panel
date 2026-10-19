@@ -12,6 +12,7 @@ import (
 	"strings"
 
 	"github.com/linguo2625469/workbuddy2api-panel/internal/prompt"
+	"github.com/linguo2625469/workbuddy2api-panel/internal/upstream"
 )
 
 // Remède aux fuites de langue PAR LE PARC.
@@ -36,6 +37,16 @@ import (
 // exposé : un client ne peut donc pas fabriquer l'en-tête pour se soustraire à la sonde
 // d'authenticité ni au remède.
 const leakRetryHeader = "X-Wb2a-Leak-Retry"
+
+// forceLangHeader : consigne de langue à appliquer au rejeu interne. Le handler réécrit
+// le prompt système en mode « custom » ; sans cet en-tête, la consigne passée au rejeu
+// serait remplacée par la consigne standard et le second essai serait identique au
+// premier. La valeur n'est lue que sur une requête de rejeu (secret ci-dessus) : un
+// client ne peut donc pas l'utiliser pour changer la langue de sa propre requête.
+const (
+	forceLangHeader = "X-Wb2a-Lang-Force"
+	forceLangStrict = "strict"
+)
 
 var leakRetrySecret = func() string {
 	b := make([]byte, 16)
@@ -88,12 +99,23 @@ var hopByHop = map[string]bool{
 //
 // Toute issue false signifie « garder la réponse d'origine » : c'est le fail-open, et c'est le
 // cas par défaut dès qu'un doute existe (transport, statut non-2xx).
-func (h *Handler) replayOnPool(w http.ResponseWriter, r *http.Request, body []byte, clientModel string,
-	stream bool, st *chatStat) bool {
+// consigneNom : nom lisible de la consigne, pour le journal d'exploitation.
+func consigneNom(directive string) string {
+	if directive == prompt.LanguageStrict {
+		return "stricte"
+	}
+	return "normale"
+}
+
+func (h *Handler) replayOnPool(w http.ResponseWriter, r *http.Request, body []byte, directive string,
+	clientModel string, stream bool, st *chatStat) bool {
 
 	addr := internalAddr(h.internalAddr)
 	url := "http://" + addr + r.URL.Path
-	outbound := prompt.Append(body, prompt.LanguageDirective)
+	if directive == "" {
+		directive = prompt.LanguageGuard
+	}
+	outbound := prompt.Append(body, directive)
 
 	req, err := http.NewRequestWithContext(r.Context(), http.MethodPost, url, bytes.NewReader(outbound))
 	if err != nil {
@@ -110,6 +132,9 @@ func (h *Handler) replayOnPool(w http.ResponseWriter, r *http.Request, body []by
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set(leakRetryHeader, leakRetrySecret)
+	if directive == prompt.LanguageStrict {
+		req.Header.Set(forceLangHeader, forceLangStrict)
+	}
 	// Le rejeu doit rester identifiable dans le journal du handler interne.
 	if clientModel != "" {
 		req.Header.Set("X-Origin-Model", clientModel)
@@ -193,6 +218,114 @@ func (h *Handler) replayOnPool(w http.ResponseWriter, r *http.Request, body []by
 	}
 	st.status = resp.StatusCode
 	st.route = "parc"
-	log.Printf("[fp] désaccord de langue : remède par le PARC (rejeu avec consigne de langue) model=%s stream=%v", clientModel, stream)
+	log.Printf("[fp] désaccord de langue : remède par le PARC (rejeu avec consigne de langue, %s) model=%s stream=%v",
+		consigneNom(directive), clientModel, stream)
+	return true
+}
+
+// tryExternalVerified sert le remède depuis le FOURNISSEUR EXTERNE, en vérifiant la
+// langue de sa réponse AVANT de l'écrire au client.
+//
+// Dernier maillon de la chaîne anti-chinois : jusqu'ici, la réponse du fournisseur payant
+// partait telle quelle. Constaté le 2026-10-20 : sur un message réduit à un emoji, le
+// rejeu du parc ET le fournisseur externe avaient répondu en chinois — la réponse
+// chinoise atteignait le client sans qu'aucun contrôle ne s'applique. Une réponse encore
+// en CJK n'est donc pas écrite : on rend la main, rien n'a été envoyé, et l'appelant sert
+// la réponse d'origine en la comptant comme fuite.
+//
+// Toute issue false signifie « rien n'a été écrit ». Un flux dont la première partie a
+// déjà été envoyée ne peut plus être rattrapé : dans ce cas on sert la suite (honnêteté du
+// flux) comme le fait le reste du chemin.
+func (h *Handler) tryExternalVerified(w http.ResponseWriter, r *http.Request, original, outbound []byte,
+	clientModel string, stream bool, st *chatStat) bool {
+
+	rr := h.cfg.Rerouter
+	if rr == nil {
+		return false
+	}
+	sentBody, outModel := rr.outboundBody(outbound)
+	if outModel == "" {
+		return false
+	}
+	res, err := rr.Upstream.ChatStreamExternal(r.Context(), rr.Target, sentBody, upstream.ExtractClientIP(r), stream)
+	if err != nil {
+		status := 0
+		if se, ok := err.(interface{ Status() int }); ok {
+			status = se.Status()
+		}
+		if rr.Stats != nil {
+			rr.Stats.NoteRerouteFailure(status)
+		}
+		log.Printf("[fp] remède externe ÉCHOUÉ (http=%d) -> repli sur la réponse d'origine", status)
+		return false
+	}
+	defer res.Body.Close()
+
+	if !stream {
+		raw, rerr := io.ReadAll(io.LimitReader(res.Body, 8<<20))
+		if rerr != nil {
+			if rr.Stats != nil {
+				rr.Stats.NoteRerouteFailure(http.StatusOK)
+			}
+			log.Printf("[fp] remède externe : corps illisible -> repli")
+			return false
+		}
+		var resp map[string]any
+		if err := json.Unmarshal(raw, &resp); err != nil {
+			agg, aerr := upstream.Aggregate(bytes.NewReader(raw))
+			if aerr != nil {
+				if rr.Stats != nil {
+					rr.Stats.NoteRerouteFailure(http.StatusOK)
+				}
+				log.Printf("[fp] remède externe : réponse illisible -> repli")
+				return false
+			}
+			resp = agg
+		}
+		if h.cfg.FPDetect != nil {
+			if v := h.cfg.FPDetect.AnalyzeResponse(original, completionText(resp)); v.Route {
+				log.Printf("[fp] remède externe : réponse ENCORE en CJK -> repli (%s)", v.Explain())
+				return false
+			}
+		}
+		SanitizeCompletion(resp, clientModel)
+		writeJSON(w, http.StatusOK, resp)
+		st.status = http.StatusOK
+		st.toks = completionTokens(resp)
+		st.route = "crazy"
+		if rr.Stats != nil {
+			rr.Stats.NoteRerouteOK()
+		}
+		log.Printf("[fp] remède par l'EXTERNE (sync, vérifié) model=%s", clientModel)
+		return true
+	}
+
+	prefix, rest := sniffStreamPrefix(res.Body)
+	if h.cfg.FPDetect != nil {
+		if v := h.cfg.FPDetect.AnalyzeStreamPrefix(original, prefix); v.Route {
+			log.Printf("[fp] remède externe : flux ENCORE en CJK -> repli (%s)", v.Explain())
+			return false
+		}
+	}
+	stats := newChatStatsReaderSince(io.MultiReader(bytes.NewReader(prefix), rest), st.start)
+	sErr := upstream.StreamWithOpts(w, stats, nil, upstream.StreamOpts{ClientModel: clientModel, SanitizeIDs: true})
+	if upstream.IsEmptyStreamError(sErr) {
+		if rr.Stats != nil {
+			rr.Stats.NoteRerouteFailure(http.StatusOK)
+		}
+		st.status = http.StatusBadGateway
+		log.Printf("[fp] remède externe : flux vide model=%s", clientModel)
+		return true
+	}
+	if toks, ok := stats.Tokens(); ok {
+		st.toks = toks
+	}
+	st.ttfb = stats.TTFB()
+	st.status = http.StatusOK
+	st.route = "crazy"
+	if rr.Stats != nil {
+		rr.Stats.NoteRerouteOK()
+	}
+	log.Printf("[fp] remède par l'EXTERNE (flux, vérifié) model=%s", clientModel)
 	return true
 }

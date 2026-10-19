@@ -72,7 +72,7 @@ func TestReplayOnPoolSertLaReponseEtMarqueLaRequete(t *testing.T) {
 	r.Header.Set("Authorization", "Bearer cle-client")
 	st := &chatStat{start: time.Now()}
 
-	if !h.replayOnPool(rec, r, corpsRequete, "claude-opus-5", false, st) {
+	if !h.replayOnPool(rec, r, corpsRequete, prompt.LanguageGuard, "claude-opus-5", false, st) {
 		t.Fatal("un 200 du parc doit être servi au client")
 	}
 	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "Yaoundé") {
@@ -103,7 +103,7 @@ func TestReplayOnPoolRefuseSurStatutNon2xx(t *testing.T) {
 	h := &Handler{internalAddr: ":7863"}
 	rec := httptest.NewRecorder()
 	r := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{}`))
-	if h.replayOnPool(rec, r, []byte(`{}`), "claude-opus-5", false, &chatStat{start: time.Now()}) {
+	if h.replayOnPool(rec, r, []byte(`{}`), prompt.LanguageGuard, "claude-opus-5", false, &chatStat{start: time.Now()}) {
 		t.Fatal("un 502 ne doit pas être servi au client")
 	}
 	if rec.Code == http.StatusBadGateway {
@@ -130,7 +130,7 @@ func TestRejeuEncoreChinoisNEstPasServi(t *testing.T) {
 	r := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewReader(corpsRequete))
 	st := &chatStat{start: time.Now()}
 
-	if h.replayOnPool(rec, r, corpsRequete, "claude-opus-5", false, st) {
+	if h.replayOnPool(rec, r, corpsRequete, prompt.LanguageGuard, "claude-opus-5", false, st) {
 		t.Fatal("un rejeu resté en chinois ne doit pas être compté comme un remède")
 	}
 	if rec.Body.Len() != 0 {
@@ -155,7 +155,7 @@ func TestRejeuFluxEncoreChinoisNEstPasServi(t *testing.T) {
 	rec := httptest.NewRecorder()
 	r := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewReader(corpsRequete))
 
-	if h.replayOnPool(rec, r, corpsRequete, "claude-opus-5", true, &chatStat{start: time.Now()}) {
+	if h.replayOnPool(rec, r, corpsRequete, prompt.LanguageGuard, "claude-opus-5", true, &chatStat{start: time.Now()}) {
 		t.Fatal("un flux rejoué resté en chinois ne doit pas être servi")
 	}
 	if rec.Body.Len() != 0 {

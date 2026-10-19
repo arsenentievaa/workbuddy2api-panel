@@ -54,6 +54,19 @@ const LanguageGuard = "Always answer in the same language as the user's messages
 	"If those messages contain no natural language (for example only code, data, symbols or a bare word), answer in English. " +
 	"Never answer in Chinese unless the user wrote in Chinese or asked for Chinese."
 
+// LanguageStrict est la consigne de DERNIER RECOURS, utilisée quand un rejeu avec
+// LanguageGuard a encore produit une réponse en chinois. Elle est plus directive (elle
+// interdit explicitement les caractères chinois) parce qu'elle s'adresse à un modèle qui
+// vient d'ignorer la consigne normale : c'est le seul levier dont on dispose quand le
+// modèle insiste.
+//
+// Elle n'est appliquée que sur un chemin de remède (jamais au trafic normal), et
+// seulement quand l'utilisateur n'écrit pas en chinois — les deux conditions sont
+// vérifiées par l'appelant.
+const LanguageStrict = "Answer only in the language of the user's messages. " +
+	"Do NOT output Chinese characters, not even one, unless the user's own message is written in Chinese. " +
+	"If the user's messages contain no natural language, answer in English."
+
 
 // ModelDisplayName 把 Claude 模型 ID 转成人读的名字：
 //

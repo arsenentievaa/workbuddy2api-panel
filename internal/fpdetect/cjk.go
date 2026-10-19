@@ -1,6 +1,7 @@
 package fpdetect
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"regexp"
@@ -83,6 +84,19 @@ func cjkShare(s string) float64 {
 const (
 	cjkMinRunes = 8
 	cjkMinShare = 0.20
+
+	// userCJKMinShare : part de CJK au-delà de laquelle on considère que l'UTILISATEUR
+	// écrit dans cette écriture. Avant, la moindre citation chinoise (« 你好 » glissé
+	// dans une question française) désarmait la détection : le client recevait ensuite
+	// une réponse entièrement chinoise sans que rien ne réagisse (trou constaté le
+	// 2026-10-20). Une citation courte ne fait pas de l'utilisateur un sinophone.
+	userCJKMinShare = 0.50
+
+	// Réponse courte : « 好的 », « 你好 » — deux caractères suffisent quand la réponse
+	// n'est presque que du CJK. Sans cette règle, les réponses brèves en chinois
+	// passaient sous le seuil de huit caractères.
+	shortCJKMinRunes   = 2
+	shortCJKLettersMax = 4
 )
 
 // asksForCJKOutputRe : l'utilisateur DEMANDE explicitement une sortie en chinois. Sans
@@ -95,6 +109,10 @@ var asksForCJKOutputRe = regexp.MustCompile(`(?i)` +
 	`in\s+(?:simplified\s+|traditional\s+)?chin(?:ese|ois)|to\s+(?:simplified\s+|traditional\s+)?chin(?:ese|ois)|` +
 	`en\s+chin(?:ois|ese)|auf\s+chinesisch|en\s+chino|` +
 	`translat\w*\s+[^.\n]{0,40}?chin|tradu\w*\s+[^.\n]{0,40}?chin|` +
+	// Autres écritures d'Asie de l'Est explicitement demandées : la réponse n'est pas une
+	// fuite mais la traduction attendue (constat 2026-10-20 : élargir la règle courte aux
+	// kana cassait « comment dit-on merci en japonais »).
+	`(?:in|en|auf|into|vers|tradu\w*|translat\w*)\s+[^.\n]{0,20}?(?:mandarin|japanese|japonais|korean|cor[ée]en|sinogramme|id[ée]ogramme|kanji|hangul|kana)|` +
 	`(?:回答|回复|输出|答案|翻译)[^。\n]{0,12}?(?:中文|汉语|简体|繁体)|(?:中文|汉语|简体|繁体)[^。\n]{0,6}?(?:回答|回复|输出|翻译)`)
 
 // asksForCJKOutput : vrai si la demande porte explicitement sur une sortie en chinois.
@@ -110,16 +128,61 @@ func languageMismatch(input, output string) bool {
 	if output == "" {
 		return false
 	}
-	// 1) L'utilisateur écrit en CJK : rien d'anormal à ce que la réponse le soit aussi.
-	if hasCJK(input) {
+	// 1) L'utilisateur écrit DANS cette écriture (et pas seulement la cite) : rien
+	//    d'anormal à ce que la réponse le soit aussi.
+	if userWritesCJK(input) {
 		return false
 	}
 	// 2) Il a demandé du chinois : la réponse chinoise est attendue.
 	if asksForCJKOutput(strings.ToLower(input)) {
 		return false
 	}
-	// 3) La réponse doit être réellement écrite en CJK, pas seulement en contenir.
-	if countCJK(output) < cjkMinRunes {
+	return outputIsCJK(output)
+}
+
+// countHan : nombre de caractères han uniquement (sans kana ni hangul).
+func countHan(s string) int {
+	if s == "" {
+		return 0
+	}
+	n := 0
+	for _, r := range s {
+		switch {
+		case r >= 0x3400 && r <= 0x4DBF, r >= 0x4E00 && r <= 0x9FFF,
+			r >= 0xF900 && r <= 0xFAFF, r >= 0x20000 && r <= 0x2FA1F:
+			n++
+		}
+	}
+	return n
+}
+
+// userWritesCJK : vrai si le message de l'utilisateur est réellement rédigé en CJK.
+// Une citation noyée dans une question latine ne suffit pas (voir userCJKMinShare).
+func userWritesCJK(input string) bool {
+	if countCJK(input) == 0 {
+		return false
+	}
+	return cjkShare(input) >= userCJKMinShare
+}
+
+// outputIsCJK : vrai si la réponse est écrite en CJK — soit longuement, soit
+// brièvement mais alors presque sans lettres latines (« 好的 »).
+func outputIsCJK(output string) bool {
+	if output == "" {
+		return false
+	}
+	cjk := countCJK(output)
+	if cjk < shortCJKMinRunes {
+		return false
+	}
+	letters := len(reLetters.FindAllString(output, -1))
+	// Règle courte : uniquement sur les caractères HAN. Une réponse en kana ou en hangul
+	// est presque toujours la traduction demandée par un client latin (« comment dit-on
+	// merci en japonais ») : la remédier serait un faux positif coûteux.
+	if han := countHan(output); han >= shortCJKMinRunes && han > letters && letters <= shortCJKLettersMax {
+		return true
+	}
+	if cjk < cjkMinRunes {
 		return false
 	}
 	return cjkShare(output) >= cjkMinShare
@@ -179,6 +242,72 @@ func countCJKInStreamFragment(raw []byte) int {
 	return n
 }
 
+// visibleStreamText : texte d'ASSISTANT contenu dans un préfixe de flux SSE, quel que
+// soit le protocole (OpenAI `choices[].delta.content`, Anthropic `delta.text`).
+//
+// Le raisonnement interne (reasoning_content / thinking) est volontairement EXCLU : un
+// modèle qui réfléchit en chinois mais répond dans la langue du client ne livre aucune
+// fuite au client. Le compter déclenchait des remèdes inutiles (un appel de parc en plus)
+// pour des réponses parfaitement correctes.
+//
+// Le JSON est décodé, ce qui règle du même coup les amonts qui échappent le non-ASCII en
+// \uXXXX : après décodage, les caractères CJK sont comptés comme les autres.
+func visibleStreamText(prefix []byte) string {
+	if len(prefix) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	for _, line := range bytes.Split(prefix, []byte("\n")) {
+		line = bytes.TrimSpace(line)
+		if !bytes.HasPrefix(line, []byte("data:")) {
+			continue
+		}
+		payload := bytes.TrimSpace(line[len("data:"):])
+		if len(payload) == 0 || bytes.Equal(payload, []byte("[DONE]")) {
+			continue
+		}
+		var obj map[string]any
+		if err := json.Unmarshal(payload, &obj); err != nil {
+			continue // ligne incomplète ou non JSON : ignorée
+		}
+		if choices, ok := obj["choices"].([]any); ok {
+			for _, ch := range choices {
+				m, ok := ch.(map[string]any)
+				if !ok {
+					continue
+				}
+				if d, ok := m["delta"].(map[string]any); ok {
+					if c, ok := d["content"].(string); ok {
+						b.WriteString(c)
+					}
+				}
+				if msg, ok := m["message"].(map[string]any); ok {
+					if c, ok := msg["content"].(string); ok {
+						b.WriteString(c)
+					}
+				}
+			}
+		}
+		if d, ok := obj["delta"].(map[string]any); ok {
+			if t, ok := d["text"].(string); ok {
+				b.WriteString(t)
+			}
+		}
+	}
+	return b.String()
+}
+
+// StreamFeatures : comptages CJK / lettres latines du texte visible d'un préfixe.
+// Exporté pour que le sniffing du flux (côté serveur) sache QUAND il en sait assez pour
+// trancher, sans dupliquer la règle de langue.
+func StreamFeatures(prefix []byte) (cjk, letters int) {
+	txt := visibleStreamText(prefix)
+	if txt == "" {
+		return 0, 0
+	}
+	return countCJK(txt), len(reLetters.FindAllString(txt, -1))
+}
+
 // WantsLanguageMismatch : vrai si le signal a un poids non nul dans cette configuration.
 // L'appelant s'en sert pour NE PAS payer le coût du préfixe de flux quand la fonction
 // est éteinte.
@@ -211,11 +340,17 @@ func (d *Detector) AnalyzeStreamPrefix(reqBody, prefix []byte) Result {
 			input, _, _ = extractParts(raw)
 		}
 	}
-	if hasCJK(input) || asksForCJKOutput(strings.ToLower(input)) {
+	if userWritesCJK(input) || asksForCJKOutput(strings.ToLower(input)) {
 		return res
 	}
 	n := countCJKInStreamFragment(prefix)
-	if n < cjkMinRunes {
+	if n < shortCJKMinRunes {
+		return res
+	}
+	// Mêmes règles qu'en non-flux, appliquées au texte visible du préfixe : une réponse
+	// brève entièrement chinoise déclenche, une réponse longue aussi.
+	visible := visibleStreamText(prefix)
+	if !outputIsCJK(visible) {
 		return res
 	}
 	w := d.weight(SigLanguageMismatch)

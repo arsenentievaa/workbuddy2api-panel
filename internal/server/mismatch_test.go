@@ -310,13 +310,15 @@ func TestMismatchDemandeLaLangueDeLUtilisateur(t *testing.T) {
 
 	postJSONClient(h, "/v1/chat/completions", clientBody(t, enQuestion, false), "u42")
 	sent := ext.last.Load().(string)
-	if !strings.Contains(sent, "same language as the user's messages") {
-		t.Fatalf("la requête rejouée doit porter la consigne de langue : %s", sent[:400])
+	// Le remède envoie la consigne STRICTE (dernier recours) : elle doit nommer la langue
+	// des messages de l'utilisateur et interdire explicitement le chinois.
+	if !strings.Contains(sent, "language of the user's messages") || !strings.Contains(sent, "Chinese") {
+		t.Fatalf("la requête rejouée doit porter la consigne de langue : %s", tronque(sent))
 	}
 	// Le corps d'origine du client n'est pas modifié (le test vérifie indirectement que
 	// la consigne a été ajoutée par lesystem prompt, pas en écrasant la question).
 	if !strings.Contains(sent, enQuestion) {
-		t.Fatalf("la question du client doit être conservée : %s", sent[:400])
+		t.Fatalf("la question du client doit être conservée : %s", tronque(sent))
 	}
 }
 
@@ -472,4 +474,13 @@ func TestFuiteDeLangueBornageMemoire(t *testing.T) {
 	if got := stats.MismatchKeptInWindow(now); got > fpKeptMaxEntries {
 		t.Fatalf("compte fenêtré incohérent : %d", got)
 	}
+}
+
+// tronque : extrait sûr pour les messages d'échec (une réponse courte ne doit pas
+// faire paniquer le test lui-même).
+func tronque(s string) string {
+	if len(s) <= 400 {
+		return s
+	}
+	return s[:400]
 }

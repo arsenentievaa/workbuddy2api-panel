@@ -40,8 +40,22 @@ import (
 // façon pour voir du texte ; on n'ajoute pas de latence perceptible, mais on renonce à
 // transmettre la trame « role: assistant » seule.
 const (
-	streamSniffMaxBytes  = 16 << 10
-	streamSniffMaxFrames = 8
+	streamSniffMaxBytes  = 64 << 10
+	streamSniffMaxFrames = 40
+
+	// Seuils de décision du préfixe : deux caractères CJK visibles suffisent à conclure
+	// (réponse chinoise, y compris brève), sinon il faut assez de lettres latines pour
+	// que la réponse soit lisiblement dans la langue du client. Avant, on s'arrêtait à
+	// la première trame porteuse de contenu : une réponse qui commençait par un emoji
+	// puis basculait en chinois passait sans être vue (constaté le 2026-10-20).
+	streamDecideCJK     = 2
+	streamDecideLetters = 48
+
+	// Une attente bornée dans le temps : au-delà, on cesse d'inspecter et on relaie tel
+	// quel. Le client ne voit de toute façon rien tant que le modèle n'a pas commencé à
+	// répondre ; cette borne évite qu'un long raisonnement interne retarde la première
+	// écriture.
+	streamSniffMaxWait = 4 * time.Second
 )
 
 // sniffStreamPrefix lit le début d'un flux SSE et retourne le préfixe consommé ainsi
@@ -55,13 +69,18 @@ func sniffStreamPrefix(rc io.Reader) ([]byte, io.Reader) {
 	br := bufio.NewReaderSize(rc, 64*1024)
 	var buf bytes.Buffer
 	frames := 0
+	deadline := time.Now().Add(streamSniffMaxWait)
 	for {
 		line, err := br.ReadBytes('\n')
 		if len(line) > 0 {
 			buf.Write(line)
 			if bytes.HasPrefix(line, []byte("data:")) {
 				frames++
-				if carriesContent(line) {
+				// Un appel d'outil n'a pas de langue : inutile d'attendre davantage.
+				if bytes.Contains(line, []byte(`"tool_calls"`)) || bytes.Contains(line, []byte(`"function_call"`)) {
+					break
+				}
+				if cjk, letters := fpdetect.StreamFeatures(buf.Bytes()); cjk >= streamDecideCJK || letters >= streamDecideLetters {
 					break
 				}
 			}
@@ -69,7 +88,7 @@ func sniffStreamPrefix(rc io.Reader) ([]byte, io.Reader) {
 		if err != nil {
 			break
 		}
-		if frames >= streamSniffMaxFrames || buf.Len() >= streamSniffMaxBytes {
+		if frames >= streamSniffMaxFrames || buf.Len() >= streamSniffMaxBytes || time.Now().After(deadline) {
 			break
 		}
 	}
@@ -136,7 +155,18 @@ func (h *Handler) rerouteOnMismatch(w http.ResponseWriter, r *http.Request, body
 	//    qu'un appel de parc. Constaté le 2026-10-20 : il s'appliquait aux deux, si bien que
 	//    527 désaccords détectés donnaient 10 remèdes et 511 fuites subies par le client
 	//    (97 %) — le plafond était épuisé en permanence (over_cap 511).
-	if h.replayOnPool(w, r, body, clientModel, stream, st) {
+	if h.replayOnPool(w, r, body, prompt.LanguageGuard, clientModel, stream, st) {
+		if h.cfg.FPStats != nil {
+			h.cfg.FPStats.NoteMismatchRerouted()
+		}
+		return true
+	}
+
+	// 2) SECOND REJEU, CONSIGNE STRICTE : quand la première reprise est revenue en chinois
+	//    elle aussi, on redemande une fois avec une consigne qui interdit explicitement les
+	//    caractères chinois. Cas visé : les messages sans langue (« 👋 ») où le modèle
+	//    s'accroche au chinois ; la consigne normale n'y suffisait pas toujours.
+	if h.replayOnPool(w, r, body, prompt.LanguageStrict, clientModel, stream, st) {
 		if h.cfg.FPStats != nil {
 			h.cfg.FPStats.NoteMismatchRerouted()
 		}
@@ -176,8 +206,8 @@ func (h *Handler) rerouteOnMismatch(w http.ResponseWriter, r *http.Request, body
 	// modèle de remplacement répond en chinois à son tour et le client ne voit aucune
 	// différence — on aurait déplacé le symptôme au lieu de le corriger. La directive
 	// n'est ajoutée QUE sur ce chemin.
-	outbound := prompt.Append(body, prompt.LanguageDirective)
-	if rr.Try(r.Context(), w, r, outbound, clientModel, stream, st, key) {
+	outbound := prompt.Append(body, prompt.LanguageStrict)
+	if h.tryExternalVerified(w, r, body, outbound, clientModel, stream, st) {
 		if h.cfg.FPStats != nil {
 			h.cfg.FPStats.NoteMismatchRerouted()
 		}

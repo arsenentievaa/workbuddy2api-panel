@@ -30,7 +30,7 @@ func TestMain(m *testing.M) {
 	os.Exit(m.Run())
 }
 
-const sseOK = "data: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"created\":1753600000,\"model\":\"glm-5.2\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"你好\"}}]}\n\n" +
+const sseOK = "data: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"created\":1753600000,\"model\":\"glm-5.2\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"hello\"}}]}\n\n" +
 	"data: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"created\":1753600000,\"model\":\"glm-5.2\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":1,\"completion_tokens\":1,\"total_tokens\":2}}\n\n" +
 	"data: [DONE]\n\n"
 
@@ -220,7 +220,7 @@ func TestChatNonStreamAggregates(t *testing.T) {
 		t.Errorf("object=%v", resp["object"])
 	}
 	msg := resp["choices"].([]any)[0].(map[string]any)["message"].(map[string]any)
-	if msg["content"] != "你好" {
+	if msg["content"] != "hello" {
 		t.Errorf("content=%q", msg["content"])
 	}
 	st, ok := h.cfg.Pool.Status("u1")
@@ -254,7 +254,7 @@ func TestChatStreamPassthrough(t *testing.T) {
 		t.Errorf("ct=%q", ct)
 	}
 	body := rec.Body.String()
-	if !strings.Contains(body, "你好") || !strings.Contains(body, "data: [DONE]") {
+	if !strings.Contains(body, "hello") || !strings.Contains(body, "data: [DONE]") {
 		t.Errorf("body=%q", body)
 	}
 	st, ok := h.cfg.Pool.Status("u1")
