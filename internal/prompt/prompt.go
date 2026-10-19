@@ -52,7 +52,7 @@ const LanguageDirective = LanguageGuard
 // n'est pas du langage naturel.
 const LanguageGuard = "Always answer in the same language as the user's messages. " +
 	"If those messages contain no natural language (for example only code, data, symbols or a bare word), answer in English. " +
-	"Never answer in Chinese unless the user wrote in Chinese."
+	"Never answer in Chinese unless the user wrote in Chinese or asked for Chinese."
 
 
 // ModelDisplayName 把 Claude 模型 ID 转成人读的名字：
