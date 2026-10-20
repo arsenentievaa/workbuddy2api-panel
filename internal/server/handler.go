@@ -737,6 +737,17 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	// l'identite annoncee au client.
 	if systemPrompt != "" {
 		systemPrompt += "\n" + h.languageDirectiveFor(r)
+		// Identite du modele DEMANDE, sur le parc aussi.
+		//
+		// Constat du 2026-10-20 (client hellidox) : sur une question d'identite non
+		// detectee comme sonde (« presente-toi », « quel est ton nom ? »), le parc
+		// repondait avec SON prompt d'agent (« un environnement de developpement »), ou
+		// pire avec le nom d'un autre modele. Le client en concluait que tous les modeles
+		// etaient le meme. La consigne d'identite de la famille est donc accrochee au
+		// prompt du parc comme au chemin externe : chaque modele demande annonce son nom.
+		if ident := prompt.IdentityDirective(clientModel); ident != "" {
+			systemPrompt += "\n" + ident
+		}
 	}
 
 	// Reroutage d'une sonde vers l'upstream externe (phase 2).
