@@ -158,6 +158,7 @@ func (p *Panel) routes() {
 	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/checkin", p.withAuth(p.accountCheckin))
 	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/balance", p.withAuth(p.accountBalance))
 	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/remove", p.withAuth(p.accountRemove))
+	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/priority", p.withAuth(p.accountPriority))
 	p.mux.HandleFunc("GET /panel/api/accounts/{uid}/tasks", p.withAuth(p.accountTasks))
 	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/tasks/accept", p.withAuth(p.accountTaskAccept))
 	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/tasks/accept_all", p.withAuth(p.taskAcceptAll))
@@ -468,6 +469,25 @@ func (p *Panel) accountBalance(w http.ResponseWriter, r *http.Request) {
 }
 
 // accountRemove 移除账号：先出池（立即落盘 state），再删 auth 文件。
+// accountPriority fixe la priorite d'exploitation d'un compte : >0 le sert en premier
+// sans exclure les autres. Corps : {"priority": 1}.
+func (p *Panel) accountPriority(w http.ResponseWriter, r *http.Request) {
+	uid := r.PathValue("uid")
+	var req struct {
+		Priority int `json:"priority"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeErr(w, http.StatusBadRequest, "invalid body")
+		return
+	}
+	if !p.cfg.Pool.SetPriority(uid, req.Priority) {
+		writeErr(w, http.StatusNotFound, "account not found")
+		return
+	}
+	log.Printf("panel: priority uid=%s -> %d（人工设置）", uid, req.Priority)
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
 func (p *Panel) accountRemove(w http.ResponseWriter, r *http.Request) {
 	uid := r.PathValue("uid")
 	a := p.cfg.Pool.Remove(uid)

@@ -367,6 +367,24 @@ func (p *Pool) SyncToDir(auths []*auth.Auth) {
 	p.wakeAllLocked()
 }
 
+// SetPriority fixe la priorite d'exploitation d'un compte (0 = normale, >0 = servie en
+// premier). Retourne false si le compte n'existe pas. La valeur est persistee avec l'etat.
+func (p *Pool) SetPriority(uid string, priorite int) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	e, ok := p.byUID[uid]
+	if !ok {
+		return false
+	}
+	if priorite < 0 {
+		priorite = 0
+	}
+	e.priority = priorite
+	p.dirty.Store(true)
+	p.saveLocked()
+	return true
+}
+
 // Remove 从池中移除账号并立即落盘（管理面板用）。返回被移除账号的凭证
 // （含 FilePath，供调用方删除 auth 文件）；uid 不存在返回 nil。
 // 在途请求的 Release 对已删条目是 no-op，无需等待。
