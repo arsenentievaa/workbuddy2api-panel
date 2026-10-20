@@ -154,3 +154,33 @@ func TestFluxReponseJsonLatineNonDetectee(t *testing.T) {
 		t.Fatal("une réponse JSON latine ne doit pas déclencher")
 	}
 }
+
+// Le texte doit être reconnu quel que soit le format des trames : SSE OpenAI, SSE
+// Anthropic, JSON par ligne sans préfixe « data: », ou réponse JSON unique. Un seul de
+// ces formats non couvert suffisait à laisser passer une réponse chinoise entière.
+func TestExtractionTousFormats(t *testing.T) {
+	prefixes := map[string]string{
+		"openai sse":   "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"有什么需要我做的？\"}}]}\n\n",
+		"anthropic":    "data: {\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text_delta\",\"text\":\"有什么需要我做的？\"}}\n\n",
+		"plat sans data": "{\"content\":\"有什么需要我做的？\"}\n",
+		"plat data":    "data: {\"content\":\"有什么需要我做的？\"}\n\n",
+		"json unique":  `{"id":"x","choices":[{"message":{"content":"有什么需要我做的？"}}]}`,
+	}
+	d := detecteur()
+	for nom, p := range prefixes {
+		if res := d.AnalyzeStreamPrefix(corps(t, "OK"), []byte(p)); !res.Route {
+			t.Errorf("%s : réponse chinoise non détectée", nom)
+		}
+	}
+}
+
+// La pensée interne ne doit pas être comptée, même quand elle arrive dans une trame
+// « content » d'un protocole qui la mélange.
+func TestPenseeNonCompteeQuelQueSoitLeFormat(t *testing.T) {
+	d := detecteur()
+	prefix := []byte("data: {\"choices\":[{\"index\":0,\"delta\":{\"reasoning_content\":\"用户只说了 OK，我应该用英语回答。\"}}]}\n\n" +
+		"data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"What do you need help with?\"}}]}\n\n")
+	if res := d.AnalyzeStreamPrefix(corps(t, "OK"), prefix); res.Route {
+		t.Fatal("une pensée en chinois avec une réponse anglaise ne doit pas déclencher")
+	}
+}

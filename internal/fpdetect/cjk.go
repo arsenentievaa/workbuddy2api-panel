@@ -257,12 +257,18 @@ func visibleStreamText(prefix []byte) string {
 		return ""
 	}
 	var b strings.Builder
+	// Chaque ligne est tentée comme du JSON, avec ou sans préfixe « data: » : selon le
+	// compte amont, le flux arrive en SSE (`data: {...}`) ou en JSON par ligne. Ne lire
+	// qu'un seul de ces formats laissait passer des réponses entières sans analyse
+	// (constaté le 2026-10-20 : « OK » en flux, réponse chinoise non vue).
 	for _, line := range bytes.Split(prefix, []byte("\n")) {
-		line = bytes.TrimSpace(line)
-		if !bytes.HasPrefix(line, []byte("data:")) {
+		payload := bytes.TrimSpace(line)
+		if len(payload) == 0 || bytes.Equal(payload, []byte("[DONE]")) {
 			continue
 		}
-		payload := bytes.TrimSpace(line[len("data:"):])
+		if bytes.HasPrefix(payload, []byte("data:")) {
+			payload = bytes.TrimSpace(payload[len("data:"):])
+		}
 		if len(payload) == 0 || bytes.Equal(payload, []byte("[DONE]")) {
 			continue
 		}
@@ -270,39 +276,73 @@ func visibleStreamText(prefix []byte) string {
 		if err := json.Unmarshal(payload, &obj); err != nil {
 			continue // ligne incomplète ou non JSON : ignorée
 		}
-		if choices, ok := obj["choices"].([]any); ok {
-			for _, ch := range choices {
-				m, ok := ch.(map[string]any)
-				if !ok {
-					continue
-				}
-				if d, ok := m["delta"].(map[string]any); ok {
-					if c, ok := d["content"].(string); ok {
-						b.WriteString(c)
-					}
-				}
-				if msg, ok := m["message"].(map[string]any); ok {
-					if c, ok := msg["content"].(string); ok {
-						b.WriteString(c)
-					}
-				}
-			}
-		}
-		if d, ok := obj["delta"].(map[string]any); ok {
-			if t, ok := d["text"].(string); ok {
-				b.WriteString(t)
-			}
-		}
+		b.WriteString(assistantText(obj))
 	}
 	if b.Len() == 0 {
 		// Certains comptes amont répondent un OBJET JSON même quand le client demande un
-		// flux. Sans ce repli, le texte de la réponse n'était jamais lu — et une réponse
-		// chinoise passait sans être vue (constaté le 2026-10-20 sur « 👋 » en flux).
+		// flux : on relit alors le corps entier comme un document.
 		if txt := textFromJSONDocument(prefix); txt != "" {
 			return txt
 		}
 	}
 	return b.String()
+}
+
+// assistantText extrait le texte d'ASSISTANT d'un objet SSE/delta, tous protocoles
+// confondus. Le raisonnement interne (reasoning_content, thinking) est exclu : un modèle
+// qui pense en chinois et répond dans la langue du client ne livre aucune fuite.
+func assistantText(obj map[string]any) string {
+	var b strings.Builder
+	if choices, ok := obj["choices"].([]any); ok {
+		for _, ch := range choices {
+			m, ok := ch.(map[string]any)
+			if !ok {
+				continue
+			}
+			for _, holder := range []map[string]any{m, mapValue(m["delta"]), mapValue(m["message"])} {
+				if holder == nil {
+					continue
+				}
+				if c, ok := holder["content"].(string); ok {
+					b.WriteString(c)
+				}
+				if t, ok := holder["text"].(string); ok {
+					b.WriteString(t)
+				}
+			}
+		}
+	}
+	// Anthropic (content_block_delta) et formes plates.
+	if d := mapValue(obj["delta"]); d != nil {
+		if t, ok := d["text"].(string); ok {
+			b.WriteString(t)
+		}
+		if c, ok := d["content"].(string); ok {
+			b.WriteString(c)
+		}
+	}
+	for _, key := range []string{"content", "text"} {
+		switch v := obj[key].(type) {
+		case string:
+			b.WriteString(v)
+		case []any:
+			for _, part := range v {
+				if pm := mapValue(part); pm != nil {
+					if t, ok := pm["text"].(string); ok {
+						b.WriteString(t)
+					}
+				}
+			}
+		}
+	}
+	return b.String()
+}
+
+func mapValue(v any) map[string]any {
+	if m, ok := v.(map[string]any); ok {
+		return m
+	}
+	return nil
 }
 
 // textFromJSONDocument : texte d'assistant d'une réponse JSON complète (hors SSE).
@@ -311,38 +351,7 @@ func textFromJSONDocument(raw []byte) string {
 	if err := json.Unmarshal(raw, &obj); err != nil {
 		return ""
 	}
-	var b strings.Builder
-	if choices, ok := obj["choices"].([]any); ok {
-		for _, ch := range choices {
-			m, ok := ch.(map[string]any)
-			if !ok {
-				continue
-			}
-			if msg, ok := m["message"].(map[string]any); ok {
-				if c, ok := msg["content"].(string); ok {
-					b.WriteString(c)
-				}
-			}
-			if c, ok := m["text"].(string); ok {
-				b.WriteString(c)
-			}
-		}
-	}
-	if content, ok := obj["content"].([]any); ok {
-		for _, part := range content {
-			if p, ok := part.(map[string]any); ok {
-				if t, ok := p["text"].(string); ok {
-					b.WriteString(t)
-				}
-			}
-		}
-	}
-	for _, key := range []string{"content", "text"} {
-		if c, ok := obj[key].(string); ok {
-			b.WriteString(c)
-		}
-	}
-	return b.String()
+	return assistantText(obj)
 }
 
 // StreamFeatures : comptages CJK / lettres latines du texte visible d'un préfixe.
