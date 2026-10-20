@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -212,6 +213,17 @@ func TestEveryErrorKindLeaksNothing(t *testing.T) {
 			h.ServeHTTP(rec, httptest.NewRequest("POST", "/v1/chat/completions",
 				strings.NewReader(`{"model":"glm-5.2","messages":[{"role":"user","content":"hi"}]}`)))
 
+			// Un refus pour limite de debit doit annoncer combien de temps attendre : sans
+			// en-tete, les clients reessaient en boucle (constat du client Huseyin, 2026-10-20).
+			if tc.wantStatus == http.StatusTooManyRequests {
+				if ra := rec.Header().Get("Retry-After"); ra == "" {
+					t.Errorf("429 sans Retry-After")
+				} else if n, err := strconv.Atoi(ra); err != nil || n <= 0 {
+					t.Errorf("Retry-After invalide : %q", ra)
+				}
+			} else if ra := rec.Header().Get("Retry-After"); ra != "" {
+				t.Errorf("Retry-After present sur un statut %d : %q", rec.Code, ra)
+			}
 			if rec.Code != tc.wantStatus {
 				t.Errorf("status=%d want %d (body=%s)", rec.Code, tc.wantStatus, rec.Body)
 			}

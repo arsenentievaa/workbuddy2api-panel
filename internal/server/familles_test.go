@@ -35,12 +35,12 @@ func rerouterFamilles(t *testing.T) *Rerouter {
 func TestFamilleChoisieParPrefixe(t *testing.T) {
 	rr := rerouterFamilles(t)
 	cas := map[string]string{
-		"claude-opus-5-5": "claude",
-		"gpt-6":           "openai",
-		"gpt-6.1-sol":     "openai",
-		"o3-mini":         "openai",
+		"claude-opus-5-5":  "claude",
+		"gpt-6":            "openai",
+		"gpt-6.1-sol":      "openai",
+		"o3-mini":          "openai",
 		"gemini-3.8-flash": "gemini",
-		"grok-4":          "grok",
+		"grok-4":           "grok",
 	}
 	for modele, attendu := range cas {
 		f := rr.familyFor(modele)

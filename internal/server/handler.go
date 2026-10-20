@@ -9,6 +9,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"strconv"
 	"strings"
 
 	"sync"
@@ -1164,6 +1165,19 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	// 不是内部引用，必须放行。
 	msg, _ = upstream.InternalLeakGuard(msg, clientModel, bareModel)
 	hint = upstream.SafeHint(hint, clientModel, bareModel)
+	// Retry-After sur les refus pour limite de debit : le client doit pouvoir reculer sans
+	// deviner. Le delai vient de l'amont quand il est connu (6004 : echeance exacte) ; sinon
+	// valeur prudente alignee sur le budget de file d'attente. Demande du client Huseyin
+	// (2026-10-20) : ses 429 n'avaient aucun en-tete, il a reessaye cinq fois pour rien.
+	if status == http.StatusTooManyRequests {
+		delai := 30
+		if ue != nil && ue.RetryAfter > 0 {
+			if sec := int(ue.RetryAfter.Seconds() + 0.999); sec > delai {
+				delai = sec
+			}
+		}
+		w.Header().Set("Retry-After", strconv.Itoa(delai))
+	}
 	writeOpenAIErrorHint(w, status, code, msg, hint)
 	st.status = status
 }
