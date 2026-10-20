@@ -74,7 +74,8 @@ func famillesExternes(cfg *Config, cleGlobale string, healthTTL time.Duration) [
 				APIKey:  cle,
 				Timeout: time.Duration(cfg.FPRoute.TimeoutSeconds) * time.Second,
 			},
-			Health: upstream.NewExternalHealth(healthTTL),
+			Health:  upstream.NewExternalHealth(healthTTL),
+			Aliases: f.Aliases,
 		})
 		log.Printf("[fp] famille %s : %d préfixe(s), modèles=%s", f.Name, len(f.Prefixes), strings.Join(f.Models, ","))
 	}

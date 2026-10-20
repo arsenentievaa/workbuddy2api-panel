@@ -287,6 +287,9 @@ type Config struct {
 			APIKeyEnv string `json:"api_key_env"`
 			// APIKey : clé en clair (déconseillée ; la variable d'environnement prime).
 			APIKey string `json:"api_key"`
+			// Aliases : correspondance « nom demandé -> modèle réel du fournisseur » quand
+			// le nom demandé n'existe pas chez lui.
+			Aliases map[string]string `json:"aliases"`
 		} `json:"families"`
 	} `json:"fp_route"`
 
@@ -412,14 +415,16 @@ func Default() *Config {
 	// Familles par défaut : chaque grande famille a son compte chez le fournisseur
 	// externe, donc sa clé (variable d'environnement) et ses modèles réels.
 	c.FPRoute.Families = []struct {
-		Name      string   `json:"name"`
-		Prefixes  []string `json:"prefixes"`
-		Models    []string `json:"models"`
-		APIKeyEnv string   `json:"api_key_env"`
-		APIKey    string   `json:"api_key"`
+		Name      string            `json:"name"`
+		Prefixes  []string          `json:"prefixes"`
+		Models    []string          `json:"models"`
+		APIKeyEnv string            `json:"api_key_env"`
+		APIKey    string            `json:"api_key"`
+		Aliases   map[string]string `json:"aliases"`
 	}{
 		{Name: "claude", Prefixes: []string{"claude-"}, APIKeyEnv: "WB2A_FP_ROUTE_API_KEY",
-			Models: []string{"claude-opus-5-5", "claude-opus-5", "claude-sonnet-5-5", "claude-sonnet-5", "claude-sonnet-4-6", "claude-haiku-4-5-20251001"}},
+			Models:  []string{"claude-opus-5-5", "claude-opus-5", "claude-sonnet-5-5", "claude-sonnet-5", "claude-sonnet-4-6", "claude-haiku-4-5-20251001"},
+			Aliases: map[string]string{"claude-haiku-5-5": "claude-haiku-4-5-20251001"}},
 		{Name: "openai", Prefixes: []string{"gpt-", "o1-", "o3-", "o4-"}, APIKeyEnv: "WB2A_FP_ROUTE_API_KEY_OPENAI",
 			Models: []string{"gpt-6.1-sol", "gpt-6-astra", "gpt-6-sol", "gpt-5.6-sol", "gpt-5.5"}},
 		{Name: "gemini", Prefixes: []string{"gemini-"}, APIKeyEnv: "WB2A_FP_ROUTE_API_KEY_GEMINI",
