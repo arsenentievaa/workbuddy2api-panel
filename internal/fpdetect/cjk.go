@@ -90,7 +90,10 @@ const (
 	// dans une question française) désarmait la détection : le client recevait ensuite
 	// une réponse entièrement chinoise sans que rien ne réagisse (trou constaté le
 	// 2026-10-20). Une citation courte ne fait pas de l'utilisateur un sinophone.
-	userCJKMinShare = 0.50
+	userCJKMinShare = 0.30
+	// Une part significative de CJK suffit : un client bilingue qui écrit un message
+	// mélangé attend une réponse dans la langue de son message, pas une erreur.
+	userCJKMinRunes = 6
 
 	// Réponse courte : « 好的 », « 你好 » — deux caractères suffisent quand la réponse
 	// n'est presque que du CJK. Sans cette règle, les réponses brèves en chinois
@@ -159,7 +162,7 @@ func countHan(s string) int {
 // userWritesCJK : vrai si le message de l'utilisateur est réellement rédigé en CJK.
 // Une citation noyée dans une question latine ne suffit pas (voir userCJKMinShare).
 func userWritesCJK(input string) bool {
-	if countCJK(input) == 0 {
+	if countCJK(input) < userCJKMinRunes {
 		return false
 	}
 	return cjkShare(input) >= userCJKMinShare

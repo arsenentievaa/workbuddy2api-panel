@@ -202,3 +202,30 @@ func TestTrameRoleAvecToolCallsNulNEstPasUnAppelDOutil(t *testing.T) {
 		t.Fatal("une trame de texte n'est pas un appel d'outil")
 	}
 }
+
+// Client bilingue : un message qui mélange latin et chinois dans une proportion
+// significative n'est pas une fuite — il veut du chinois, et le remédier lui renvoyait
+// une erreur (constaté en production : 7 requêtes écartées).
+func TestClientBilingueNonRemedie(t *testing.T) {
+	d := detecteur()
+	input := "Je reprends le travail : 请把刚才那段代码改成 Go 的版本"
+	if !userWritesCJK(input) {
+		t.Fatalf("un message bilingue significatif doit être reconnu : %q", input)
+	}
+	if res := d.AnalyzeResponse(corps(t, input), "好的，我把那段代码改成 Go 版本。"); res.Route {
+		t.Fatal("un client bilingue ne doit pas être remédié")
+	}
+}
+
+// Une simple citation noyée dans une question latine ne suffit pas, même avec le seuil
+// abaissé.
+func TestCitationCourteToujoursDetectee(t *testing.T) {
+	d := detecteur()
+	input := "Que veut dire «光合作用» exactement, et comment l'expliquer à un enfant de dix ans ?"
+	if userWritesCJK(input) {
+		t.Fatal("une citation de quatre caractères ne fait pas un client sinophone")
+	}
+	if res := d.AnalyzeResponse(corps(t, input), "光合作用是植物把光变成化学能的过程，可以这样向孩子解释……"); !res.Route {
+		t.Fatal("la réponse reste entièrement chinoise : elle doit être détectée")
+	}
+}
