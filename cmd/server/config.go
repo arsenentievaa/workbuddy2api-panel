@@ -271,6 +271,23 @@ type Config struct {
 		// RateAlertPercent / RateAlertMinSample : surveillance du taux de reroutage.
 		RateAlertPercent   float64 `json:"rate_alert_percent"`    // défaut 5
 		RateAlertMinSample int64   `json:"rate_alert_min_sample"` // défaut 50
+		// Families : familles de modèles servies par le fournisseur externe, chacune avec
+		// SA clé. Un client qui teste « es-tu vraiment GPT ? » doit recevoir une réponse
+		// de GPT : la famille est choisie sur le modèle DEMANDÉ par le client.
+		Families []struct {
+			Name string `json:"name"`
+			// Prefixes : préfixes de modèles qui désignent cette famille (« gpt- »,
+			// « gemini- », « grok- », « claude- »).
+			Prefixes []string `json:"prefixes"`
+			// Models : modèles réellement disponibles chez le fournisseur, par ordre de
+			// préférence. Le premier sert de défaut.
+			Models []string `json:"models"`
+			// APIKeyEnv : variable d'environnement qui porte la clé de la famille. La clé
+			// n'entre ainsi pas dans la configuration sauvegardée.
+			APIKeyEnv string `json:"api_key_env"`
+			// APIKey : clé en clair (déconseillée ; la variable d'environnement prime).
+			APIKey string `json:"api_key"`
+		} `json:"families"`
 	} `json:"fp_route"`
 
 	// Telegram : alertes d'exploitation. Les identifiants peuvent aussi venir des
@@ -391,6 +408,25 @@ func Default() *Config {
 	c.FPRoute.LanguageLeakWindowSeconds = 900
 	c.FPRoute.RateAlertPercent = 5
 	c.FPRoute.RateAlertMinSample = 50
+
+	// Familles par défaut : chaque grande famille a son compte chez le fournisseur
+	// externe, donc sa clé (variable d'environnement) et ses modèles réels.
+	c.FPRoute.Families = []struct {
+		Name      string   `json:"name"`
+		Prefixes  []string `json:"prefixes"`
+		Models    []string `json:"models"`
+		APIKeyEnv string   `json:"api_key_env"`
+		APIKey    string   `json:"api_key"`
+	}{
+		{Name: "claude", Prefixes: []string{"claude-"}, APIKeyEnv: "WB2A_FP_ROUTE_API_KEY",
+			Models: []string{"claude-opus-5-5", "claude-opus-5", "claude-sonnet-5-5", "claude-sonnet-5", "claude-sonnet-4-6", "claude-haiku-4-5-20251001"}},
+		{Name: "openai", Prefixes: []string{"gpt-", "o1-", "o3-", "o4-"}, APIKeyEnv: "WB2A_FP_ROUTE_API_KEY_OPENAI",
+			Models: []string{"gpt-6.1-sol", "gpt-6-astra", "gpt-6-sol", "gpt-5.6-sol", "gpt-5.5"}},
+		{Name: "gemini", Prefixes: []string{"gemini-"}, APIKeyEnv: "WB2A_FP_ROUTE_API_KEY_GEMINI",
+			Models: []string{"gemini-3.8-flash", "gemini-4-argon"}},
+		{Name: "grok", Prefixes: []string{"grok-", "composer-"}, APIKeyEnv: "WB2A_FP_ROUTE_API_KEY_GROK",
+			Models: []string{"grok-4.6", "grok-4.5", "grok-4.3"}},
+	}
 	c.SessionSticky.Enabled = true
 	c.SessionSticky.TTL = "30m"
 	c.SessionSticky.GCInterval = "5m"
@@ -498,6 +534,19 @@ func applyEnv(c *Config) {
 	// fichier de configuration (donc pas par les sauvegardes).
 	if v := os.Getenv("WB2A_FP_ROUTE_API_KEY"); v != "" {
 		c.FPRoute.APIKey = v
+	}
+	// Clés par famille : WB2A_FP_ROUTE_API_KEY_<NOM> (ex. _OPENAI, _GEMINI, _GROK).
+	for i := range c.FPRoute.Families {
+		f := &c.FPRoute.Families[i]
+		if f.APIKeyEnv != "" {
+			if v := os.Getenv(f.APIKeyEnv); v != "" {
+				f.APIKey = v
+			}
+		}
+		name := strings.ToUpper(strings.NewReplacer("-", "_", ".", "_").Replace(f.Name))
+		if v := os.Getenv("WB2A_FP_ROUTE_API_KEY_" + name); v != "" {
+			f.APIKey = v
+		}
 	}
 	if v := os.Getenv("WB2A_FP_ROUTE_BASE_URL"); v != "" {
 		c.FPRoute.BaseURL = v
@@ -717,6 +766,41 @@ func (c *Config) normalize() error {
 	// est une configuration légitime (désactiver l'isolation par client), on ne la
 	// remplace donc pas par la valeur par défaut.
 	c.FPRoute.ClientIDHeader = strings.TrimSpace(c.FPRoute.ClientIDHeader)
+	// Familles : chacune doit avoir un nom, au moins un préfixe et un modèle.
+	vus := map[string]bool{}
+	for i := range c.FPRoute.Families {
+		f := &c.FPRoute.Families[i]
+		f.Name = strings.TrimSpace(f.Name)
+		if f.Name == "" {
+			return fmt.Errorf("fp_route.families[%d]: nom vide", i)
+		}
+		if vus[strings.ToLower(f.Name)] {
+			return fmt.Errorf("fp_route.families: nom %q en double", f.Name)
+		}
+		vus[strings.ToLower(f.Name)] = true
+		// Préfixes vides retirés.
+		prefixes := make([]string, 0, len(f.Prefixes))
+		for _, p := range f.Prefixes {
+			if p = strings.TrimSpace(p); p != "" {
+				prefixes = append(prefixes, p)
+			}
+		}
+		if len(prefixes) == 0 {
+			return fmt.Errorf("fp_route.families[%q]: aucun préfixe de modèle", f.Name)
+		}
+		f.Prefixes = prefixes
+		models := make([]string, 0, len(f.Models))
+		for _, m := range f.Models {
+			if m = strings.TrimSpace(m); m != "" {
+				models = append(models, m)
+			}
+		}
+		if len(models) == 0 {
+			return fmt.Errorf("fp_route.families[%q]: aucun modèle", f.Name)
+		}
+		f.Models = models
+	}
+
 	if c.FPRoute.LanguageLeakWindowSeconds <= 0 {
 		c.FPRoute.LanguageLeakWindowSeconds = 900
 	}

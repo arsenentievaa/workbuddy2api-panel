@@ -139,7 +139,65 @@
     "client_id_header": "X-Client-Id",
     "language_leak_window_seconds": 900,
     "rate_alert_percent": 5,
-    "rate_alert_min_sample": 50
+    "rate_alert_min_sample": 50,
+    "families": [
+      {
+        "name": "claude",
+        "prefixes": [
+          "claude-"
+        ],
+        "api_key_env": "WB2A_FP_ROUTE_API_KEY",
+        "models": [
+          "claude-opus-5-5",
+          "claude-opus-5",
+          "claude-sonnet-5-5",
+          "claude-sonnet-5",
+          "claude-sonnet-4-6",
+          "claude-haiku-4-5-20251001"
+        ]
+      },
+      {
+        "name": "openai",
+        "prefixes": [
+          "gpt-",
+          "o1-",
+          "o3-",
+          "o4-"
+        ],
+        "api_key_env": "WB2A_FP_ROUTE_API_KEY_OPENAI",
+        "models": [
+          "gpt-6.1-sol",
+          "gpt-6-astra",
+          "gpt-6-sol",
+          "gpt-5.6-sol",
+          "gpt-5.5"
+        ]
+      },
+      {
+        "name": "gemini",
+        "prefixes": [
+          "gemini-"
+        ],
+        "api_key_env": "WB2A_FP_ROUTE_API_KEY_GEMINI",
+        "models": [
+          "gemini-3.8-flash",
+          "gemini-4-argon"
+        ]
+      },
+      {
+        "name": "grok",
+        "prefixes": [
+          "grok-",
+          "composer-"
+        ],
+        "api_key_env": "WB2A_FP_ROUTE_API_KEY_GROK",
+        "models": [
+          "grok-4.6",
+          "grok-4.5",
+          "grok-4.3"
+        ]
+      }
+    ]
   },
   "telegram": {
     "bot_token": "",

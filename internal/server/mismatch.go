@@ -187,7 +187,7 @@ func (h *Handler) rerouteOnMismatch(w http.ResponseWriter, r *http.Request, body
 	// 2) REMÈDE PAR LE FOURNISSEUR EXTERNE (chemin historique). La santé de ce fournisseur est
 	//    vérifiée ici et non avant le rejeu : elle ne conditionne que ce chemin. La logique de
 	//    DecideLeak est reprise sur place pour ne pas consommer le budget une seconde fois.
-	healthy, justDown := rr.Probe(r.Context())
+	healthy, justDown := rr.probeFamily(r.Context(), clientModel)
 	if !healthy && justDown && rr.Stats != nil {
 		rr.Stats.NoteHealthBlocked()
 	}

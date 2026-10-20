@@ -84,8 +84,130 @@ type Rerouter struct {
 
 	Upstream *upstream.Client
 	Health   *upstream.ExternalHealth
+	// Families : familles de modèles servies par le fournisseur externe (claude, openai,
+	// gemini, grok…). Vide = comportement historique à cible unique.
+	Families []*Family
 	Stats    *FPCounters
 	Alerts   *alert.Notifier
+}
+
+// Family : une famille de modèles servie par le fournisseur externe, avec SA clé.
+//
+// Pourquoi : un client qui teste « es-tu vraiment GPT ? » doit recevoir une réponse de
+// GPT, pas de Claude. Une clé unique (celle de Claude) ne peut pas servir GPT, Gemini ou
+// Grok : chaque famille a son compte chez le fournisseur, donc sa clé et ses modèles.
+//
+// La famille est choisie sur le modèle DEMANDÉ PAR LE CLIENT (X-Origin-Model, transmis
+// par NewAPI lors d'un model_mapping), et non sur le modèle réécrit qui part vers le
+// parc : c'est la seule information qui dise ce que le client croit utiliser.
+type Family struct {
+	Name     string
+	Prefixes []string
+	// Models : modèles réellement disponibles chez le fournisseur pour cette famille,
+	// par ordre de préférence. Le premier est le défaut.
+	Models []string
+	Target upstream.ExternalTarget
+	Health *upstream.ExternalHealth
+	// Aliases : correspondance demandée -> modèle réel du fournisseur (facultatif).
+	Aliases map[string]string
+}
+
+// familyFor : famille dont un préfixe correspond au modèle demandé (le plus long gagne).
+// nil = aucune famille (repli sur la cible historique, comportement inchangé).
+func (rr *Rerouter) familyFor(clientModel string) *Family {
+	if rr == nil || len(rr.Families) == 0 {
+		return nil
+	}
+	m := strings.ToLower(strings.TrimSpace(clientModel))
+	var best *Family
+	bestLen := 0
+	for _, f := range rr.Families {
+		for _, p := range f.Prefixes {
+			if p == "" || !strings.HasPrefix(m, strings.ToLower(p)) {
+				continue
+			}
+			if len(p) > bestLen {
+				best, bestLen = f, len(p)
+			}
+		}
+	}
+	return best
+}
+
+// targetFor : cible externe à utiliser pour ce modèle demandé.
+func (rr *Rerouter) targetFor(clientModel string) upstream.ExternalTarget {
+	if f := rr.familyFor(clientModel); f != nil {
+		return f.Target
+	}
+	return rr.Target
+}
+
+// modelesPour : modèles du fournisseur à essayer, dans l'ordre.
+func (rr *Rerouter) modelesPour(clientModel string) []string {
+	f := rr.familyFor(clientModel)
+	if f == nil || len(f.Models) == 0 {
+		if strings.TrimSpace(rr.ModelDefault) == "" {
+			return nil
+		}
+		return []string{rr.ModelDefault}
+	}
+	demande := strings.TrimSpace(clientModel)
+	if f.Aliases != nil {
+		if v, ok := f.Aliases[demande]; ok && v != "" {
+			return append([]string{v}, f.Models...)
+		}
+	}
+	for _, m := range f.Models {
+		if strings.EqualFold(m, demande) {
+			// Le nom demandé existe chez le fournisseur : on le garde en tête.
+			reste := make([]string, 0, len(f.Models))
+			reste = append(reste, m)
+			for _, autre := range f.Models {
+				if !strings.EqualFold(autre, m) {
+					reste = append(reste, autre)
+				}
+			}
+			return reste
+		}
+	}
+	return f.Models
+}
+
+// healthFor : verdict de santé de la famille concernée.
+func (rr *Rerouter) healthFor(clientModel string) *upstream.ExternalHealth {
+	if f := rr.familyFor(clientModel); f != nil && f.Health != nil {
+		return f.Health
+	}
+	return rr.Health
+}
+
+// probeFamily : sonde la santé de la famille du modèle demandé.
+func (rr *Rerouter) probeFamily(ctx context.Context, clientModel string) (bool, bool) {
+	health := rr.healthFor(clientModel)
+	if rr == nil || health == nil {
+		return false, false
+	}
+	probe := rr.targetFor(clientModel)
+	if strings.TrimSpace(rr.HealthPath) != "" {
+		probe.Path = rr.HealthPath
+	}
+	ok, transition, err := health.Healthy(ctx, func(ctx context.Context) error {
+		return rr.Upstream.ProbeExternal(ctx, probe)
+	})
+	if transition && rr.Alerts != nil {
+		nom := "CrazyToken"
+		if f := rr.familyFor(clientModel); f != nil {
+			nom = "CrazyToken/" + f.Name
+		}
+		if ok {
+			rr.Alerts.Send(alert.KeyHealthUp, "✅ "+nom+" de nouveau sain : le reroutage reprend.")
+		} else {
+			rr.Alerts.Send(alert.KeyHealthDown, fmt.Sprintf(
+				"🔴 %s malsain : sonde échouée (%v). Les requêtes repartent sur WorkBuddy (fail-open).",
+				nom, trimErr(err)))
+		}
+	}
+	return ok, transition && !ok
 }
 
 // rerouteIdentity : clé d'isolation du plafond anti-abus.
@@ -195,11 +317,11 @@ func trimErr(err error) string {
 
 // Decide arbitre le reroutage : santé puis plafonds. Consomme le quota quand il
 // autorise. Retourne (autorise, motif).
-func (rr *Rerouter) Decide(ctx context.Context, key string, now time.Time) (bool, string) {
+func (rr *Rerouter) Decide(ctx context.Context, key string, now time.Time, clientModel string) (bool, string) {
 	if rr == nil || !rr.Enabled {
 		return false, reasonDisabled
 	}
-	ok, justDown := rr.Probe(ctx)
+	ok, justDown := rr.probeFamily(ctx, clientModel)
 	if !ok {
 		if justDown && rr.Stats != nil {
 			rr.Stats.NoteHealthBlocked()
@@ -232,11 +354,11 @@ func (rr *Rerouter) Decide(ctx context.Context, key string, now time.Time) (bool
 // un défaut déjà visible par le client, pas une dépense de confort. Le 2026-10-02, les
 // quatre fuites détectées ont toutes été servies au client parce que ce quota partagé
 // était épuisé par les sondes du même client.
-func (rr *Rerouter) DecideLeak(ctx context.Context, key string, now time.Time) (bool, string) {
+func (rr *Rerouter) DecideLeak(ctx context.Context, key string, now time.Time, clientModel string) (bool, string) {
 	if rr == nil || !rr.Enabled {
 		return false, reasonDisabled
 	}
-	ok, justDown := rr.Probe(ctx)
+	ok, justDown := rr.probeFamily(ctx, clientModel)
 	if !ok {
 		if justDown && rr.Stats != nil {
 			rr.Stats.NoteHealthBlocked()
@@ -249,6 +371,57 @@ func (rr *Rerouter) DecideLeak(ctx context.Context, key string, now time.Time) (
 	return rr.Stats.AllowLeakReroute(key, now)
 }
 
+// appelExterne appelle le fournisseur avec SA famille (donc sa clé) et le bon modèle.
+//
+// Les modèles de la famille sont essayés dans l'ordre : le fournisseur répond souvent
+// « All available accounts exhausted » sur un modèle précis alors qu'un autre de la même
+// famille répond. Trois essais au plus, pour borner le coût et la latence.
+// messagesPath = true bascule sur l'endpoint Anthropic du même fournisseur.
+func (rr *Rerouter) appelExterne(ctx context.Context, body []byte, clientModel, clientIP string,
+	stream, messagesPath bool) (*upstream.ExternalResult, string, error) {
+
+	target := rr.targetFor(clientModel)
+	if messagesPath {
+		target.Path = rr.MessagesPath
+		target.Anthropic = true
+	}
+	// Aucune famille configurée : comportement historique à cible unique (le modèle du
+	// client est transmis tel quel s'il est plausible chez le fournisseur).
+	if rr.familyFor(clientModel) == nil {
+		sentBody, outModel := rr.outboundBody(body)
+		if outModel == "" {
+			return nil, "", fmt.Errorf("modèle indisponible")
+		}
+		res, err := rr.sendExternal(ctx, target, sentBody, clientIP, stream)
+		return res, outModel, err
+	}
+	models := rr.modelesPour(clientModel)
+	if strings.TrimSpace(target.BaseURL) == "" || strings.TrimSpace(target.APIKey) == "" || len(models) == 0 {
+		return nil, "", fmt.Errorf("cible externe incomplète")
+	}
+	var lastErr error
+	for i, m := range models {
+		out := rr.outboundBodyFor(body, clientModel, m)
+		if out == nil {
+			return nil, "", fmt.Errorf("corps vide")
+		}
+		envoyer := rr.sendExternalOnce
+		if i >= len(models)-1 || i >= 2 {
+			envoyer = rr.sendExternal // dernier essai : une reprise vaut la peine
+		}
+		res, err := envoyer(ctx, target, out, clientIP, stream)
+		if err == nil {
+			return res, m, nil
+		}
+		lastErr = err
+		if i >= 2 {
+			break
+		}
+		log.Printf("[fp] modèle %s indisponible chez le fournisseur (%v) -> modèle suivant", m, trimErr(err))
+	}
+	return nil, "", lastErr
+}
+
 // Try sert la requête depuis l'upstream externe. Retourne true si la réponse a été
 // écrite au client — dans ce cas l'appelant DOIT retourner sans toucher au pool.
 //
@@ -257,11 +430,7 @@ func (rr *Rerouter) DecideLeak(ctx context.Context, key string, now time.Time) (
 func (rr *Rerouter) Try(ctx context.Context, w http.ResponseWriter, r *http.Request,
 	body []byte, clientModel string, stream bool, st *chatStat, key string) bool {
 
-	sentBody, outModel := rr.outboundBody(body)
-	if outModel == "" {
-		return false
-	}
-	res, err := rr.sendExternal(ctx, rr.Target, sentBody, upstream.ExtractClientIP(r), stream)
+	res, outModel, err := rr.appelExterne(ctx, body, clientModel, upstream.ExtractClientIP(r), stream, false)
 	if err != nil {
 		// Jamais le corps d'erreur du fournisseur : il décrit une infrastructure dont
 		// l'existence est précisément ce que la sonde cherche. Seul le code HTTP est
@@ -353,6 +522,14 @@ const (
 	rerouteAlertMinFailures = 3
 )
 
+// sendExternalOnce : un seul appel, sans reprise. Utilisé quand d'autres modèles de la
+// même famille restent à essayer : mieux vaut changer de modèle que réessayer celui qui
+// vient de refuser (le fournisseur répond souvent « comptes épuisés » par modèle).
+func (rr *Rerouter) sendExternalOnce(ctx context.Context, target upstream.ExternalTarget, body []byte,
+	clientIP string, stream bool) (*upstream.ExternalResult, error) {
+	return rr.Upstream.ChatStreamExternal(ctx, target, body, clientIP, stream)
+}
+
 // sendExternal appelle le fournisseur externe avec UNE reprise sur 5xx.
 //
 // Un 502 renvoyé par le fournisseur est presque toujours passager (passerelle saturée) :
@@ -362,7 +539,7 @@ const (
 func (rr *Rerouter) sendExternal(ctx context.Context, target upstream.ExternalTarget, body []byte,
 	clientIP string, stream bool) (*upstream.ExternalResult, error) {
 
-	res, err := rr.Upstream.ChatStreamExternal(ctx, target, body, clientIP, stream)
+	res, err := rr.sendExternalOnce(ctx, target, body, clientIP, stream)
 	if err == nil {
 		return res, nil
 	}
@@ -429,8 +606,23 @@ func str(v any) string {
 // outboundBody prépare le corps envoyé au fournisseur externe et retourne aussi le
 // modèle demandé. Le corps du client n'est jamais modifié sur place : la route normale
 // peut encore en avoir besoin après un échec.
+// outboundBodyFor prépare le corps pour une famille et un modèle de fournisseur donnés.
+// Le corps du client n'est jamais modifié sur place : la route normale peut encore en
+// avoir besoin après un échec.
+func (rr *Rerouter) outboundBodyFor(body []byte, clientModel, model string) []byte {
+	if rr == nil {
+		return nil
+	}
+	out := upstream.RewriteModel(body, model)
+	if rr.MaxTokensCeiling > 0 {
+		out = clampMaxTokens(out, rr.MaxTokensCeiling)
+	}
+	return out
+}
+
 func (rr *Rerouter) outboundBody(body []byte) ([]byte, string) {
-	if rr == nil || strings.TrimSpace(rr.Target.BaseURL) == "" || strings.TrimSpace(rr.Target.APIKey) == "" {
+	target := rr.Target
+	if strings.TrimSpace(target.BaseURL) == "" || strings.TrimSpace(target.APIKey) == "" {
 		return nil, ""
 	}
 	// Le modèle demandé au fournisseur : celui du client s'il est plausible chez lui,
@@ -577,7 +769,7 @@ func (h *Handler) anthropicMessages(w http.ResponseWriter, r *http.Request) {
 			"the gateway exposes the OpenAI-compatible surface for normal traffic")
 		return
 	}
-	allowed, reason := rr.Decide(r.Context(), key, time.Now())
+	allowed, reason := rr.Decide(r.Context(), key, time.Now(), clientModel)
 	if !allowed {
 		log.Printf("[fp] (messages) reroutage refusé (%s) model=%s %s", reason, peek.Model, res.Explain())
 		st.status = http.StatusServiceUnavailable
@@ -604,14 +796,7 @@ func (h *Handler) anthropicMessages(w http.ResponseWriter, r *http.Request) {
 func (rr *Rerouter) tryAnthropic(ctx context.Context, w http.ResponseWriter, r *http.Request,
 	body []byte, clientModel string, stream bool, st *chatStat) bool {
 
-	target := rr.Target
-	target.Path = rr.MessagesPath
-	target.Anthropic = true
-	out, outModel := rr.outboundBody(body)
-	if outModel == "" {
-		return false
-	}
-	res, err := rr.sendExternal(ctx, target, out, upstream.ExtractClientIP(r), stream)
+	res, outModel, err := rr.appelExterne(ctx, body, clientModel, upstream.ExtractClientIP(r), stream, true)
 	if err != nil {
 		status := 0
 		if se, ok := err.(interface{ Status() int }); ok {
@@ -804,7 +989,7 @@ func (h *Handler) tryReroute(w http.ResponseWriter, r *http.Request, body []byte
 		return false
 	}
 	key := rerouteIdentity(r, body, rr.ClientIDHeader)
-	allowed, reason := rr.Decide(r.Context(), key, time.Now())
+	allowed, reason := rr.Decide(r.Context(), key, time.Now(), clientModel)
 	if !allowed {
 		log.Printf("[fp] reroutage refusé (%s) -> route normale model=%s", reason, clientModel)
 		return false

@@ -243,11 +243,7 @@ func (h *Handler) tryExternalVerified(w http.ResponseWriter, r *http.Request, or
 	if rr == nil {
 		return false
 	}
-	sentBody, outModel := rr.outboundBody(outbound)
-	if outModel == "" {
-		return false
-	}
-	res, err := rr.Upstream.ChatStreamExternal(r.Context(), rr.Target, sentBody, upstream.ExtractClientIP(r), stream)
+	res, _, err := rr.appelExterne(r.Context(), outbound, clientModel, upstream.ExtractClientIP(r), stream, false)
 	if err != nil {
 		status := 0
 		if se, ok := err.(interface{ Status() int }); ok {

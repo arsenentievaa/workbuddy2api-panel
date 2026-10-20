@@ -49,6 +49,38 @@ func stateSibling(stateFile, name string) string {
 	return filepath.Join(dir, name)
 }
 
+// famillesExternes construit les familles de modèles servies par le fournisseur externe.
+//
+// Chaque famille a sa propre clé (variable d'environnement) et ses propres modèles : un
+// client qui teste « es-tu vraiment GPT ? » doit recevoir une réponse de GPT, pas de
+// Claude. Une famille dont la clé manque retombe sur la clé globale et le signale : mieux
+// vaut une réponse d'un vrai modèle que la réponse du parc.
+func famillesExternes(cfg *Config, cleGlobale string, healthTTL time.Duration) []*server.Family {
+	var out []*server.Family
+	for _, f := range cfg.FPRoute.Families {
+		cle := strings.TrimSpace(f.APIKey)
+		if cle == "" {
+			cle = cleGlobale
+			log.Printf("AVERTISSEMENT: fp_route.families[%q]: aucune clé propre (%s vide) — repli sur la clé globale",
+				f.Name, f.APIKeyEnv)
+		}
+		out = append(out, &server.Family{
+			Name:     f.Name,
+			Prefixes: f.Prefixes,
+			Models:   f.Models,
+			Target: upstream.ExternalTarget{
+				BaseURL: cfg.FPRoute.BaseURL,
+				Path:    cfg.FPRoute.Path,
+				APIKey:  cle,
+				Timeout: time.Duration(cfg.FPRoute.TimeoutSeconds) * time.Second,
+			},
+			Health: upstream.NewExternalHealth(healthTTL),
+		})
+		log.Printf("[fp] famille %s : %d préfixe(s), modèles=%s", f.Name, len(f.Prefixes), strings.Join(f.Models, ","))
+	}
+	return out
+}
+
 func main() {
 	cfgPath := flag.String("config", "config.json", "配置文件路径（默认当前目录 config.json；不存在时自动生成推荐配置）")
 	flag.Parse()
@@ -368,6 +400,7 @@ func main() {
 				ClientIDHeader:   cfg.FPRoute.ClientIDHeader,
 				HealthPath:       cfg.FPRoute.HealthPath,
 				ModelDefault:     cfg.FPRoute.Model,
+				Families:         famillesExternes(cfg, key, healthTTL),
 				ModelPrefixes:    cfg.FPRoute.ModelPrefixes,
 				MaxTokensCeiling: cfg.FPRoute.MaxTokensCeiling,
 				RateAlertPercent: cfg.FPRoute.RateAlertPercent,
