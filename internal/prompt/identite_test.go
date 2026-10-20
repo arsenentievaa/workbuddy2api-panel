@@ -45,3 +45,15 @@ func contains(s, sub string) bool {
 	}
 	return false
 }
+
+// « Es-tu Claude ? » doit donner « oui », et non « non, je suis un environnement ».
+func TestDirectiveRepondOuiALaFamille(t *testing.T) {
+	for modele, famille := range map[string]string{
+		"claude-opus-5-5": "Claude", "gpt-6": "ChatGPT", "gemini-3.8-flash": "Gemini", "grok-4": "Grok",
+	} {
+		d := IdentityDirective(modele)
+		if !contains(d, "whether you are "+famille) {
+			t.Errorf("la directive de %q doit permettre de répondre oui à « es-tu %s » : %q", modele, famille, d)
+		}
+	}
+}

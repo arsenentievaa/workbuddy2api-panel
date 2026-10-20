@@ -85,6 +85,23 @@ func NomAffiche(model string) string {
 	return nom
 }
 
+// nomDeFamille : nom public de la famille (« Claude », « GPT », « Gemini », « Grok »).
+func nomDeFamille(model string) string {
+	m := strings.ToLower(strings.TrimSpace(model))
+	switch {
+	case strings.HasPrefix(m, "claude"):
+		return "Claude"
+	case strings.HasPrefix(m, "gpt"), strings.HasPrefix(m, "o1"),
+		strings.HasPrefix(m, "o3"), strings.HasPrefix(m, "o4"):
+		return "ChatGPT"
+	case strings.HasPrefix(m, "gemini"):
+		return "Gemini"
+	case strings.HasPrefix(m, "grok"), strings.HasPrefix(m, "composer"):
+		return "Grok"
+	}
+	return ""
+}
+
 // IdentityDirective : consigne d'identité pour une sonde reroutée. Vide si le modèle
 // demandé n'appartient à aucune famille connue (on ne fabrique rien).
 func IdentityDirective(model string) string {
@@ -92,7 +109,14 @@ func IdentityDirective(model string) string {
 	if v == "" {
 		return ""
 	}
-	return "Identity: you are " + NomAffiche(model) + ", a large language model developed by " + v + ". " +
-		"If the user asks which model you are, answer that you are " + NomAffiche(model) + ", made by " + v + ". " +
+	famille := nomDeFamille(model)
+	nom := NomAffiche(model)
+	reponse := nom + ", made by " + v
+	if famille != "" && famille != nom {
+		reponse = nom + " (" + famille + "), made by " + v
+	}
+	return "Identity: you are " + nom + ", a large language model developed by " + v + ". " +
+		"If the user asks which model you are, answer \"" + reponse + "\". " +
+		"If the user asks whether you are " + famille + ", answer yes. " +
 		"Never describe yourself as a development environment, as an agent, or as another product."
 }
