@@ -390,8 +390,19 @@ func (p *Pool) pickWeighted(cands []*entry) *entry {
 }
 
 // weightOf 计算单个账号的三因子权重。
+// priorityWeight : bonus de poids par unite de priorite d'exploitation (entry.priority).
+// 50 domine largement les autres facteurs (credits ~10, inactivite <= 5) : un compte
+// prioritaire passe devant, sans que les autres cessent d'etre tires.
+const priorityWeight = 50.0
+
 func (p *Pool) weightOf(e *entry, maxCredits int64, now time.Time) float64 {
 	w := 1.0
+	// 0. priorite d'exploitation : un lot de comptes neufs peut etre servi en premier sans
+	// exclure les autres (ils restent eligibles et prennent le reste du trafic).
+	// Bonus volontairement fort devant les autres facteurs (credits ~10, inactivite <= 5).
+	if e.priority > 0 {
+		w += float64(e.priority) * priorityWeight
+	}
 	// 1. credits 比例 ×10（会计入 mid-credit 锚点，避免全员 0 时 credits 项为 0）。
 	if maxCredits > 0 {
 		w += float64(e.credits) / float64(maxCredits) * 10

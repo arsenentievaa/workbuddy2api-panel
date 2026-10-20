@@ -174,7 +174,12 @@ type entry struct {
 	until           time.Time // 冷却截止（即时冷却：CoolSoft 429 / CoolHard 余额耗尽）
 	disabled        bool
 	reason          string
-	lastUsed        time.Time // 最近被选中时刻（防并发撞号）
+	// priority : priorite de selection (0 = normale, >0 = servie en premier).
+	// Sert a faire tourner un lot de comptes neufs avant les anciens sans les exclure :
+	// le poids de tirage est augmente, donc ils passent devant, mais les autres restent
+	// eligibles et servent le reste du trafic.
+	priority int
+	lastUsed time.Time // 最近被选中时刻（防并发撞号）
 	// usedSeq 单调递增的选中序号：每次被 pick 选中时取 p.pickSeq 自增值。
 	// Windows 等平台 time.Now() 精度有限（~0.5ms），高并发/快速连续选号时多个
 	// 账号 lastUsed 完全相等，基于 wall-clock 的 LRU/防惊群判定失效。
@@ -380,6 +385,7 @@ func (e *entry) fallbackKind(now time.Time) string {
 // stateAccount 单个账号的持久化状态（JSON tag 全小写下划线，向后兼容：缺字段零值）。
 type stateAccount struct {
 	Credits      int64     `json:"credits"`
+	Priority     int       `json:"priority,omitempty"`
 	CreditsTotal int64     `json:"credits_total,omitempty"`
 	Disabled     bool      `json:"disabled"`
 	Reason       string    `json:"reason,omitempty"`

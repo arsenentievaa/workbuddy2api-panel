@@ -147,6 +147,7 @@ func (p *Pool) applyAccountsLocked(accounts map[string]stateAccount) {
 			creditsExpiring:  s.CreditsExpiring,
 			disabled:         s.Disabled,
 			reason:           s.Reason,
+			priority:         s.Priority,
 			until:            s.Until,
 			coolKind:         s.CoolKind,
 			successCount:     s.SuccessCount,
@@ -267,6 +268,7 @@ func (p *Pool) stateOverviewLocked() stateFile {
 	for uid, e := range p.byUID {
 		s := stateAccount{
 			Credits:          e.credits,
+			Priority:         e.priority,
 			CreditsTotal:     e.creditsTotal,
 			Disabled:         e.disabled,
 			Reason:           e.reason,
