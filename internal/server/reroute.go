@@ -420,6 +420,21 @@ func (rr *Rerouter) appelExterne(ctx context.Context, body []byte, clientModel, 
 		log.Printf("[fp] modèle %s indisponible chez le fournisseur (%v) -> modèle suivant", m, trimErr(err))
 	}
 
+	// DERNIÈRE TENTATIVE DANS LA FAMILLE DEMANDÉE : les 502 du fournisseur arrivent par
+	// rafales (« comptes épuisés ») ; une seconde tentative 500 ms plus tard réussit
+	// souvent. Mieux vaut cela qu'un repli inter-familles qui trahit l'identité.
+	if len(models) > 0 && !time.Now().After(limite) {
+		select {
+		case <-ctx.Done():
+		case <-time.After(500 * time.Millisecond):
+		}
+		if out := rr.outboundBodyFor(body, clientModel, models[0]); out != nil && !time.Now().After(limite) {
+			if res, err := rr.sendExternal(ctx, target, avecIdentite(out, clientModel), clientIP, stream); err == nil {
+				return res, models[0], nil
+			}
+		}
+	}
+
 	// REPLI INTER-FAMILLES : la famille demandée est en panne (le fournisseur répond
 	// « comptes épuisés » par famille). Une réponse d'un VRAI modèle vaut mieux que la
 	// réponse du parc, qui trahirait le backend chinois : on réessaie chez la famille la
