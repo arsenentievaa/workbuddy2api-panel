@@ -354,6 +354,53 @@ func textFromJSONDocument(raw []byte) string {
 	return assistantText(obj)
 }
 
+// HasToolCallFrame : vrai si la ligne de données transporte un APPEL D'OUTIL réel.
+//
+// La plupart des amonts émettent `"tool_calls": null` (ou `"function_call": null`) dans
+// leur première trame : une simple recherche du mot-clé concluait « c'est un appel
+// d'outil » dès la trame de rôle, le sniffing s'arrêtait avant tout texte et aucune
+// réponse de flux n'était jamais analysée (constaté le 2026-10-20 : toutes les fuites
+// observées étaient des flux). On décode donc la trame et l'on exige une liste non vide.
+func HasToolCallFrame(line []byte) bool {
+	payload := strings.TrimSpace(string(line))
+	if strings.HasPrefix(payload, "data:") {
+		payload = strings.TrimSpace(payload[len("data:"):])
+	}
+	if payload == "" || payload == "[DONE]" {
+		return false
+	}
+	var obj map[string]any
+	if err := json.Unmarshal([]byte(payload), &obj); err != nil {
+		return false
+	}
+	nonVide := func(v any) bool {
+		switch t := v.(type) {
+		case []any:
+			return len(t) > 0
+		case map[string]any:
+			return len(t) > 0
+		}
+		return false
+	}
+	if choices, ok := obj["choices"].([]any); ok {
+		for _, ch := range choices {
+			m, ok := ch.(map[string]any)
+			if !ok {
+				continue
+			}
+			for _, holder := range []map[string]any{m, mapValue(m["delta"]), mapValue(m["message"])} {
+				if holder == nil {
+					continue
+				}
+				if nonVide(holder["tool_calls"]) || nonVide(holder["function_call"]) {
+					return true
+				}
+			}
+		}
+	}
+	return nonVide(obj["tool_calls"]) || nonVide(obj["function_call"])
+}
+
 // StreamFeatures : comptages CJK / lettres latines du texte visible d'un préfixe.
 // Exporté pour que le sniffing du flux (côté serveur) sache QUAND il en sait assez pour
 // trancher, sans dupliquer la règle de langue.

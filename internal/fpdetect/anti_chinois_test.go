@@ -184,3 +184,21 @@ func TestPenseeNonCompteeQuelQueSoitLeFormat(t *testing.T) {
 		t.Fatal("une pensée en chinois avec une réponse anglaise ne doit pas déclencher")
 	}
 }
+
+// « tool_calls » présent mais nul (cas de la plupart des amonts dans leur trame de rôle)
+// ne doit PAS faire conclure à un appel d'outil : le sniffing s'arrêtait alors avant tout
+// texte, et aucune réponse de flux n'était analysée.
+func TestTrameRoleAvecToolCallsNulNEstPasUnAppelDOutil(t *testing.T) {
+	role := []byte(`data: {"choices":[{"delta":{"role":"assistant","tool_calls":null,"function_call":null},"index":0}]}`)
+	if HasToolCallFrame(role) {
+		t.Fatal("tool_calls nul ne doit pas passer pour un appel d'outil")
+	}
+	reel := []byte(`data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"x","function":{"name":"f","arguments":"{}"}}]}}]}`)
+	if !HasToolCallFrame(reel) {
+		t.Fatal("un vrai appel d'outil doit être reconnu")
+	}
+	corpsVide := []byte(`data: {"choices":[{"delta":{"content":"bonjour"}}]}`)
+	if HasToolCallFrame(corpsVide) {
+		t.Fatal("une trame de texte n'est pas un appel d'outil")
+	}
+}
