@@ -48,12 +48,13 @@ const (
 	streamSniffMaxFrames = 400
 
 	// Seuils de décision du préfixe : deux caractères CJK visibles suffisent à conclure
-	// (réponse chinoise, y compris brève), sinon il faut assez de lettres latines pour
-	// que la réponse soit lisiblement dans la langue du client. Avant, on s'arrêtait à
-	// la première trame porteuse de contenu : une réponse qui commençait par un emoji
-	// puis basculait en chinois passait sans être vue (constaté le 2026-10-20).
+	// (réponse chinoise, y compris brève), sinon 24 lettres latines — assez pour qu'une
+	// réponse soit lisiblement dans la langue du client, assez tôt pour ne pas retarder
+	// la première écriture de plusieurs secondes.
+	// Avant, on s'arrêtait à la première trame porteuse de contenu : une réponse qui
+	// commençait par un emoji puis basculait en chinois passait sans être vue (2026-10-20).
 	streamDecideCJK     = 2
-	streamDecideLetters = 48
+	streamDecideLetters = 24
 
 	// Une attente bornée dans le temps : au-delà, on cesse d'inspecter et on relaie tel
 	// quel. Le client ne voit de toute façon rien tant que le modèle n'a pas commencé à
