@@ -261,7 +261,7 @@ func (rr *Rerouter) Try(ctx context.Context, w http.ResponseWriter, r *http.Requ
 	if outModel == "" {
 		return false
 	}
-	res, err := rr.Upstream.ChatStreamExternal(ctx, rr.Target, sentBody, upstream.ExtractClientIP(r), stream)
+	res, err := rr.sendExternal(ctx, rr.Target, sentBody, upstream.ExtractClientIP(r), stream)
 	if err != nil {
 		// Jamais le corps d'erreur du fournisseur : il décrit une infrastructure dont
 		// l'existence est précisément ce que la sonde cherche. Seul le code HTTP est
@@ -274,14 +274,7 @@ func (rr *Rerouter) Try(ctx context.Context, w http.ResponseWriter, r *http.Requ
 		if status > 0 {
 			reason = reasonBadStatus
 		}
-		if rr.Stats != nil {
-			rr.Stats.NoteRerouteFailure(status)
-		}
-		if rr.Alerts != nil {
-			rr.Alerts.Send(alert.KeyRerouteError, fmt.Sprintf(
-				"⚠️ Échec de reroutage (%s, http=%d) : la requête est repartie sur WorkBuddy. Détail technique : %s",
-				reason, status, trimErr(err)))
-		}
+		rr.noteEchecExterne(status, err, reason)
 		log.Printf("[fp] reroutage ÉCHOUÉ (%s http=%d) -> repli WorkBuddy model=%s", reason, status, clientModel)
 		return false
 	}
@@ -352,6 +345,80 @@ func (rr *Rerouter) Try(ctx context.Context, w http.ResponseWriter, r *http.Requ
 	log.Printf("[fp] REROUTÉ vers l'upstream externe (sync) model_client=%s model_externe=%s id=%s",
 		clientModel, outModel, str(resp["id"]))
 	return true
+}
+
+// rerouteAlertMinFailures : nombre d'échecs dans la fenêtre avant d'alerter.
+const (
+	rerouteAlertWindow      = 15 * time.Minute
+	rerouteAlertMinFailures = 3
+)
+
+// sendExternal appelle le fournisseur externe avec UNE reprise sur 5xx.
+//
+// Un 502 renvoyé par le fournisseur est presque toujours passager (passerelle saturée) :
+// une seconde tentative immédiate suffit le plus souvent, et évite au client de recevoir
+// un repli alors que le service était disponible. Les 4xx ne sont pas rejoués (la requête
+// ne passera pas davantage).
+func (rr *Rerouter) sendExternal(ctx context.Context, target upstream.ExternalTarget, body []byte,
+	clientIP string, stream bool) (*upstream.ExternalResult, error) {
+
+	res, err := rr.Upstream.ChatStreamExternal(ctx, target, body, clientIP, stream)
+	if err == nil {
+		return res, nil
+	}
+	status := 0
+	if se, ok := err.(interface{ Status() int }); ok {
+		status = se.Status()
+	}
+	if status < 500 {
+		return nil, err
+	}
+	select {
+	case <-ctx.Done():
+		return nil, err
+	case <-time.After(250 * time.Millisecond):
+	}
+	if res2, err2 := rr.Upstream.ChatStreamExternal(ctx, target, body, clientIP, stream); err2 == nil {
+		return res2, nil
+	}
+	return nil, err
+}
+
+// doitAlerterEchec : faut-il envoyer l'alerte d'échec de reroutage ? Seulement quand
+// les échecs se répètent dans la fenêtre — un 502 isolé du fournisseur ne mérite pas un
+// message sur le téléphone de l'exploitant, la requête étant déjà repartie sur le parc.
+// Fonction pure pour être testable sans réseau.
+func (rr *Rerouter) doitAlerterEchec(now time.Time) (bool, int) {
+	if rr == nil || rr.Stats == nil {
+		return false, 0
+	}
+	n := rr.Stats.RerouteFailuresInWindow(now, rerouteAlertWindow)
+	return n >= rerouteAlertMinFailures, n
+}
+
+// noteEchecExterne : enregistre un échec, invalide la santé et n'alerte que si les
+// échecs se répètent. Un 502 isolé ne mérite pas un message sur le téléphone de
+// l'exploitant : la requête est déjà repartie sur le parc et le client n'a rien vu.
+func (rr *Rerouter) noteEchecExterne(status int, err error, libelle string) {
+	if rr.Stats != nil {
+		rr.Stats.NoteRerouteFailure(status)
+	}
+	if rr.Health != nil {
+		rr.Health.MarkDown(fmt.Sprintf("%s http=%d : %v", libelle, status, trimErr(err)))
+	}
+	if rr.Alerts == nil {
+		return
+	}
+	alerter, n := rr.doitAlerterEchec(time.Now())
+	if !alerter {
+		log.Printf("[fp] échec de reroutage isolé (%d/%d dans la fenêtre) : pas d'alerte", n, rerouteAlertMinFailures)
+		return
+	}
+	rr.Alerts.SendWindow(alert.KeyRerouteError, fmt.Sprintf(
+		"⚠️ Reroutage vers le fournisseur externe en échec répété : %d échecs en %d min (dernier : %s http=%d). "+
+			"Les requêtes repartent sur WorkBuddy (le client n'a rien vu) et le fournisseur est marqué malsain "+
+			"jusqu'à la prochaine sonde réussie.",
+		n, int(rerouteAlertWindow.Minutes()), libelle, status), rerouteAlertWindow)
 }
 
 func str(v any) string {
@@ -544,19 +611,13 @@ func (rr *Rerouter) tryAnthropic(ctx context.Context, w http.ResponseWriter, r *
 	if outModel == "" {
 		return false
 	}
-	res, err := rr.Upstream.ChatStreamExternal(ctx, target, out, upstream.ExtractClientIP(r), stream)
+	res, err := rr.sendExternal(ctx, target, out, upstream.ExtractClientIP(r), stream)
 	if err != nil {
 		status := 0
 		if se, ok := err.(interface{ Status() int }); ok {
 			status = se.Status()
 		}
-		if rr.Stats != nil {
-			rr.Stats.NoteRerouteFailure(status)
-		}
-		if rr.Alerts != nil {
-			rr.Alerts.Send(alert.KeyRerouteError, fmt.Sprintf(
-				"⚠️ Échec de reroutage Messages (http=%d) : %s", status, trimErr(err)))
-		}
+		rr.noteEchecExterne(status, err, "Messages")
 		log.Printf("[fp] (messages) reroutage ÉCHOUÉ http=%d -> erreur au client model=%s", status, clientModel)
 		return false
 	}

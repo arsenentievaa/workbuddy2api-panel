@@ -276,6 +276,35 @@ func (h *ExternalHealth) errLocked() error {
 	return &targetError{reason: h.lastErr}
 }
 
+// MarkDown invalide immédiatement un verdict « sain » après un échec constaté en
+// conditions réelles (et non par la sonde).
+//
+// Pourquoi : la sonde n'est réévaluée que toutes les 5 minutes. Entre deux sondes, un
+// fournisseur qui renvoie 502 reste « sain » au cache, chaque requête reroutée échoue,
+// et l'exploitant reçoit une alerte par échec. Constaté le 2026-10-20 (alerte
+// « Échec de reroutage ... http=502 » reçue sur téléphone). Après un échec réel, le
+// verdict bascule : les reroutages suivants sont refusés sans appel ni alerte, jusqu'à
+// la prochaine sonde.
+func (h *ExternalHealth) MarkDown(reason string) {
+	if h == nil {
+		return
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if reason == "" {
+		reason = "échec constaté en conditions réelles"
+	}
+	prev := h.healthy
+	h.healthy = false
+	h.lastErr = reason
+	h.checkedAt = time.Now()
+	h.failures++
+	h.checks++
+	if prev {
+		h.changed++
+	}
+}
+
 // Snapshot : état de santé pour /status et pour les alertes.
 type HealthSnapshot struct {
 	Healthy bool `json:"healthy"`

@@ -1219,6 +1219,9 @@ type FPCounters struct {
 	// reroutage a échoué OU a été refusé (plafond, upstream malsain).
 	MismatchRerouted int64
 	MismatchKept     int64
+	// rerouteFailAt : horodatages des échecs de reroutage (fenêtre d'alerte).
+	rerouteFailAt []time.Time
+
 	// mismatchKeptAt : horodatages des fuites, pour la fenêtre glissante de l'alerte.
 	// Borné (pruned à chaque écriture) : un incident prolongé ne doit pas faire croître
 	// la mémoire du compteur.
@@ -1542,7 +1545,21 @@ func (c *FPCounters) NoteRerouteOK() {
 func (c *FPCounters) NoteRerouteFailure(status int) {
 	c.mu.Lock()
 	c.RerouteFailed++
+	c.rerouteFailAt = append(c.rerouteFailAt, time.Now())
+	if len(c.rerouteFailAt) > fpKeptMaxEntries {
+		c.rerouteFailAt = append([]time.Time(nil), c.rerouteFailAt[len(c.rerouteFailAt)-fpKeptMaxEntries:]...)
+	}
 	c.mu.Unlock()
+}
+
+// RerouteFailuresInWindow : nombre d'échecs de reroutage dans la fenêtre donnée.
+// Sert à n'alerter que sur une panne RÉELLE (plusieurs échecs) et non sur un 502 isolé
+// du fournisseur : une alerte par échec harcelait l'exploitant (2026-10-20).
+func (c *FPCounters) RerouteFailuresInWindow(now time.Time, window time.Duration) int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.rerouteFailAt = pruneTimes(c.rerouteFailAt, now.Add(-window))
+	return len(c.rerouteFailAt)
 }
 
 func (c *FPCounters) NoteHealthBlocked() {
