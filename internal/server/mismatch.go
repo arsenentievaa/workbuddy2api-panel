@@ -70,11 +70,12 @@ const (
 // La lecture s'arrête dès qu'une trame porteuse de contenu est vue : c'est le premier
 // instant où l'on peut trancher, et cela borne le délai ajouté à la première écriture.
 func sniffStreamPrefix(rc io.Reader) ([]byte, io.Reader) {
-	return sniffStreamPrefixDbg(rc)
+	p, r, _ := sniffStreamPrefixDbg(rc)
+	return p, r
 }
 
 // sniffStreamPrefixDbg : variante instrumentée (diagnostic temporaire).
-func sniffStreamPrefixDbg(rc io.Reader) ([]byte, io.Reader) {
+func sniffStreamPrefixDbg(rc io.Reader) ([]byte, io.Reader, string) {
 	br := bufio.NewReaderSize(rc, 64*1024)
 	var buf bytes.Buffer
 	frames := 0
@@ -87,21 +88,20 @@ func sniffStreamPrefixDbg(rc io.Reader) ([]byte, io.Reader) {
 				frames++
 				// Un appel d'outil n'a pas de langue : inutile d'attendre davantage.
 				if bytes.Contains(line, []byte(`"tool_calls"`)) || bytes.Contains(line, []byte(`"function_call"`)) {
-					break
+					return buf.Bytes(), br, "outil"
 				}
 				if cjk, letters := fpdetect.StreamFeatures(buf.Bytes()); cjk >= streamDecideCJK || letters >= streamDecideLetters {
-					break
+					return buf.Bytes(), br, fmt.Sprintf("decidable cjk=%d lettres=%d", cjk, letters)
 				}
 			}
 		}
 		if err != nil {
-			break
+			return buf.Bytes(), br, fmt.Sprintf("erreur=%v", err)
 		}
 		if frames >= streamSniffMaxFrames || buf.Len() >= streamSniffMaxBytes || time.Now().After(deadline) {
-			break
+			return buf.Bytes(), br, fmt.Sprintf("bornes trames=%d octets=%d", frames, buf.Len())
 		}
 	}
-	return buf.Bytes(), br
 }
 
 // carriesContent : vrai si une trame SSE transporte du texte d'assistant. Deux formes

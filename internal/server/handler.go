@@ -1021,16 +1021,15 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			// si le signal est réellement armé.
 			src := io.Reader(rc)
 			if h.languageMismatchEnabled() {
-				prefix, rest := sniffStreamPrefix(rc)
+				prefix, rest, motif := sniffStreamPrefixDbg(rc)
 				src = io.MultiReader(bytes.NewReader(prefix), rest)
 				if h.rerouteOnStreamMismatch(w, r, body, prefix, clientModel, st) {
 					rc.Close()
 					return
 				}
 				cjk, letters := fpdetect.StreamFeatures(prefix)
-				log.Printf("[dbg-flux2] octets=%d data=%d choix=%d cjk=%d lettres=%d premier=%q",
-					len(prefix), strings.Count(string(prefix), "data:"), strings.Count(string(prefix), `"choices"`),
-					cjk, letters, premiereTrame(prefix))
+				log.Printf("[dbg-flux2] octets=%d data=%d cjk=%d lettres=%d motif=%q",
+					len(prefix), strings.Count(string(prefix), "data:"), cjk, letters, motif)
 			}
 			stats := newChatStatsReaderSince(src, st.start)
 			// gateway_hint（SSE）：成功状态 200 已开流，中途 error 帧透传时附加
