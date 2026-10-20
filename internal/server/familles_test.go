@@ -108,8 +108,41 @@ func TestModeleSuivantEssayeSiIndisponible(t *testing.T) {
 	} else if m != "gpt-6-astra" {
 		t.Fatalf("modèle utilisé = %s", m)
 	}
-	if len(modeles) != 2 {
-		t.Fatalf("deux essais attendus, %d", len(modeles))
+	// gpt-6.1-sol est tenté deux fois (reprise sur 5xx) puis gpt-6-astra prend le relais.
+	if len(modeles) != 3 || modeles[2] != "gpt-6-astra" {
+		t.Fatalf("essais inattendus : %v", modeles)
 	}
 	_ = atomic.LoadInt64
+}
+
+// Si toute une famille est en panne (le fournisseur répond « comptes épuisés » par
+// famille), la réponse vient d'une AUTRE famille de vrais modèles, jamais du parc : une
+// réponse du parc trahirait le backend chinois, ce qui est exactement ce qu'on évite.
+func TestRepliInterFamilles(t *testing.T) {
+	var cles []string
+	ext := newFakeExternal(t, func(w http.ResponseWriter, r *http.Request, body string) {
+		cle := r.Header.Get("Authorization")
+		cles = append(cles, cle)
+		if cle == "Bearer cle-openai" {
+			w.WriteHeader(http.StatusBadGateway)
+			_, _ = w.Write([]byte(`{"error":{"message":"All available accounts exhausted"}}`))
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"x","choices":[{"message":{"content":"Je suis Claude."}}]}`))
+	})
+	rr := rerouterFamilles(t)
+	for _, f := range rr.Families {
+		f.Target.BaseURL = ext.srv.URL
+	}
+	res, m, err := rr.appelExterne(context.Background(), []byte(`{"model":"x","messages":[]}`), "gpt-6", "", false, false)
+	if err != nil || res == nil {
+		t.Fatalf("le repli doit servir une réponse : %v", err)
+	}
+	if m == "gpt-6.1-sol" || m == "gpt-6-astra" {
+		t.Fatalf("le modèle servi doit venir de la famille de repli, obtenu %s", m)
+	}
+	if cles[len(cles)-1] != "Bearer cle-claude" {
+		t.Fatalf("la dernière tentative doit utiliser la clé Claude, vu %v", cles)
+	}
 }

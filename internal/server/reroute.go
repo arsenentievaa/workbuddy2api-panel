@@ -399,27 +399,65 @@ func (rr *Rerouter) appelExterne(ctx context.Context, body []byte, clientModel, 
 	if strings.TrimSpace(target.BaseURL) == "" || strings.TrimSpace(target.APIKey) == "" || len(models) == 0 {
 		return nil, "", fmt.Errorf("cible externe incomplète")
 	}
+	// Budget de temps : une famille qui pend ne doit pas retenir la sonde du client.
+	limite := time.Now().Add(25 * time.Second)
 	var lastErr error
 	for i, m := range models {
+		if i >= 3 || time.Now().After(limite) {
+			break
+		}
 		out := rr.outboundBodyFor(body, clientModel, m)
 		if out == nil {
 			return nil, "", fmt.Errorf("corps vide")
 		}
-		envoyer := rr.sendExternalOnce
-		if i >= len(models)-1 || i >= 2 {
-			envoyer = rr.sendExternal // dernier essai : une reprise vaut la peine
-		}
-		res, err := envoyer(ctx, target, out, clientIP, stream)
+		res, err := rr.sendExternal(ctx, target, out, clientIP, stream)
 		if err == nil {
 			return res, m, nil
 		}
 		lastErr = err
-		if i >= 2 {
-			break
-		}
 		log.Printf("[fp] modèle %s indisponible chez le fournisseur (%v) -> modèle suivant", m, trimErr(err))
 	}
+
+	// REPLI INTER-FAMILLES : la famille demandée est en panne (le fournisseur répond
+	// « comptes épuisés » par famille). Une réponse d'un VRAI modèle vaut mieux que la
+	// réponse du parc, qui trahirait le backend chinois : on réessaie chez la famille la
+	// plus fiable (Claude), et seulement ensuite on rend la main.
+	if fam := rr.familyParNom("claude"); fam != nil && !time.Now().After(limite) {
+		cible := fam.Target
+		if messagesPath {
+			cible.Path = rr.MessagesPath
+			cible.Anthropic = true
+		}
+		for i, m := range fam.Models {
+			if i >= 2 || time.Now().After(limite) {
+				break
+			}
+			out := rr.outboundBodyFor(body, "claude", m)
+			if out == nil {
+				continue
+			}
+			res, err := rr.sendExternal(ctx, cible, out, clientIP, stream)
+			if err == nil {
+				log.Printf("[fp] repli inter-familles : %s indisponible, réponse servie par %s", clientModel, m)
+				return res, m, nil
+			}
+			lastErr = err
+		}
+	}
 	return nil, "", lastErr
+}
+
+// familyParNom retrouve une famille par son nom (« claude », « openai »…).
+func (rr *Rerouter) familyParNom(nom string) *Family {
+	if rr == nil {
+		return nil
+	}
+	for _, f := range rr.Families {
+		if strings.EqualFold(f.Name, nom) {
+			return f
+		}
+	}
+	return nil
 }
 
 // Try sert la requête depuis l'upstream externe. Retourne true si la réponse a été
