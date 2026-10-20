@@ -16,6 +16,7 @@ import (
 
 	"github.com/linguo2625469/workbuddy2api-panel/internal/alert"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/fpdetect"
+	"github.com/linguo2625469/workbuddy2api-panel/internal/prompt"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/session"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/upstream"
 )
@@ -410,6 +411,7 @@ func (rr *Rerouter) appelExterne(ctx context.Context, body []byte, clientModel, 
 		if out == nil {
 			return nil, "", fmt.Errorf("corps vide")
 		}
+		out = avecIdentite(out, clientModel)
 		res, err := rr.sendExternal(ctx, target, out, clientIP, stream)
 		if err == nil {
 			return res, m, nil
@@ -436,6 +438,7 @@ func (rr *Rerouter) appelExterne(ctx context.Context, body []byte, clientModel, 
 			if out == nil {
 				continue
 			}
+			out = avecIdentite(out, clientModel)
 			res, err := rr.sendExternal(ctx, cible, out, clientIP, stream)
 			if err == nil {
 				log.Printf("[fp] repli inter-familles : %s indisponible, réponse servie par %s", clientModel, m)
@@ -445,6 +448,20 @@ func (rr *Rerouter) appelExterne(ctx context.Context, body []byte, clientModel, 
 		}
 	}
 	return nil, "", lastErr
+}
+
+// avecIdentite ajoute la consigne d'identité de la famille au corps envoyé au
+// fournisseur externe (voir prompt.IdentityDirective).
+//
+// Sans elle, le fournisseur enveloppe le modèle dans SON prompt d'agent et le modèle
+// répond « non, je suis un environnement de développement » à la question « es-tu
+// Claude ? » — constaté le 2026-10-20. La consigne est placée en dernier : ce qui est lu
+// en dernier pèse le plus.
+func avecIdentite(body []byte, clientModel string) []byte {
+	if d := prompt.IdentityDirective(clientModel); d != "" {
+		return prompt.Append(body, d)
+	}
+	return body
 }
 
 // familyParNom retrouve une famille par son nom (« claude », « openai »…).
