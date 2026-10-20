@@ -362,6 +362,30 @@ func main() {
 		tgChat = cfg.Telegram.ChatID
 	}
 	notifier := alert.New(tgToken, tgChat)
+	// Alerte « compte hors service » : des qu'un compte tombe (bannissement amont, session
+	// morte, ou limite de debit), l'exploitant est prevenu. Constat du 2026-10-20 : 13 comptes
+	// avaient ete bannis sans que personne ne le sache, et le pool a fondu de 17 a 4 sans
+	// alerte. Deduplication PAR COMPTE et PAR CAUSE (30 min) : une panne de masse previent
+	// une fois par compte, un compte qui oscille ne spamme pas.
+	p.SetOnDown(func(kind, uid, nickname, reason string) {
+		libelle := "hors service"
+		if kind == "rate_limited" {
+			libelle = "en limite de debit (rate limit)"
+		}
+		nom := nickname
+		if nom == "" {
+			nom = uid
+		}
+		cle := "account_down:" + uid + ":" + kind
+		envoye := notifier.SendWindow(cle, fmt.Sprintf(
+			"\u26a0\ufe0f Compte %s : %s (%s)\nCause : %s\nPool : verifier /status",
+			libelle, nom, uid[:8], reason), 30*time.Minute)
+		if envoye {
+			log.Printf("[pool] alerte envoyee : compte %s (%s) %s — %s", nom, uid[:8], libelle, reason)
+		} else {
+			log.Printf("[pool] compte %s (%s) %s — alerte deja envoyee recemment", nom, uid[:8], libelle)
+		}
+	})
 	if notifier.Enabled() {
 		log.Printf("alertes Telegram: activées")
 	} else {

@@ -50,6 +50,7 @@ func (p *Pool) Cooldown(uid string, kind CoolKind, d time.Duration, reason strin
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if e, ok := p.byUID[uid]; ok {
+		etaitSain := !e.disabled && e.healthy(time.Now())
 		e.until = time.Now().Add(d)
 		e.coolKind = kind
 		e.reason = reason
@@ -58,6 +59,9 @@ func (p *Pool) Cooldown(uid string, kind CoolKind, d time.Duration, reason strin
 		// （否则换模型请求会错误绕过本次冷却）。
 		e.modelCooldowns = nil
 		p.dirty.Store(true)
+		if etaitSain {
+			p.notifierBaisse("rate_limited", e, reason)
+		}
 	}
 }
 
@@ -77,6 +81,7 @@ func (p *Pool) CooldownSoftForModel(uid string, base time.Duration, resetAt time
 	defer p.mu.Unlock()
 	if e, ok := p.byUID[uid]; ok {
 		now := time.Now()
+		etaitSain := !e.disabled && e.healthy(now)
 		if !resetAt.IsZero() {
 			// 有上游重置时间（6004 模型级限流）：Option 2 —— 冻结到账户级 until
 			// （所有模型都不可用，不再豁免切模型），冷却截止 = min(resetAt,
@@ -98,6 +103,9 @@ func (p *Pool) CooldownSoftForModel(uid string, base time.Duration, resetAt time
 			e.modelCooldowns = nil
 		}
 		p.dirty.Store(true)
+		if etaitSain {
+			p.notifierBaisse("rate_limited", e, reason)
+		}
 	}
 }
 

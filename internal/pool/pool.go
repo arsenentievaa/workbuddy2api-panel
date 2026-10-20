@@ -25,6 +25,11 @@ type Pool struct {
 	breakerCooldownMax time.Duration
 	// softRateMax 软冷却指数退避的封顶（SetSoftRateMax 注入；默认 defaultSoftRateMax）。
 	softRateMax time.Duration
+	// onDown : callback d'exploitation appele quand un compte TOMBE (desactive/banni ou
+	// mis en limite de debit). Non bloquant : l'appelant notifie (Telegram) depuis la
+	// file d'alertes, jamais depuis le chemin de requete.
+	onDown func(kind, uid, nickname, reason string)
+
 	// costExploreInterval costTier 条件探索窗口（issue #136 方案 a′，SetCostExploreInterval
 	// 注入；默认 defaultCostExploreInterval 30m）。tier 0 垄断 + tier 1 存在且距上次
 	// 探索 ≥ 窗口时，本次 pick 生效层切 tier 1-only（探索=搭车改道，零新增上游请求）。
@@ -365,6 +370,28 @@ func (p *Pool) SyncToDir(auths []*auth.Auth) {
 	}
 	// 对齐可能带来新账号（容量增加）→ 唤醒饱和等待者复核。
 	p.wakeAllLocked()
+}
+
+// SetOnDown installe le callback « compte hors service » (banni ou limite de debit).
+// kind vaut "disabled" ou "rate_limited".
+func (p *Pool) SetOnDown(f func(kind, uid, nickname, reason string)) {
+	p.mu.Lock()
+	p.onDown = f
+	p.mu.Unlock()
+}
+
+// notifierBaisseLocked : appelle le callback hors verrou (copie de la fonction).
+// L'appelant doit avoir DEJA modifie l'etat ; le callback ne fait que notifier.
+func (p *Pool) notifierBaisse(kind string, e *entry, reason string) {
+	if p.onDown == nil || e == nil {
+		return
+	}
+	nick := ""
+	if e.a != nil {
+		nick = e.a.Nickname
+	}
+	f := p.onDown
+	go f(kind, e.a.UID, nick, reason)
 }
 
 // SetPriority fixe la priorite d'exploitation d'un compte (0 = normale, >0 = servie en

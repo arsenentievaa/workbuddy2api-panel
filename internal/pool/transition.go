@@ -46,10 +46,15 @@ func (e *entry) clearCoolingLocked() {
 // 熔断器保留：熔断是「连续 5xx 失败」信号（与授权/会话无关），禁用后再复活时
 // 熔断观测仍有效，不应被禁用覆盖。
 func (p *Pool) disableLocked(e *entry, reason string) {
+	etaitActif := !e.disabled
 	e.clearCoolingLocked()
 	e.disabled = true
 	e.reason = reason
 	p.dirty.Store(true)
+	if etaitActif {
+		// Le compte vient de tomber : on previent l'exploitant (deduplication cote notifieur).
+		p.notifierBaisse("disabled", e, reason)
+	}
 }
 
 // reviveCoolingLocked 只清冷却域（until/coolKind/reason/softStreak/modelCooldowns）
