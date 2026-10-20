@@ -57,3 +57,22 @@ func TestDirectiveRepondOuiALaFamille(t *testing.T) {
 		}
 	}
 }
+
+// La note utilisateur doit atterrir dans le DERNIER message utilisateur, sans toucher
+// aux autres messages ni emporter l'historique.
+func TestAppendUserNote(t *testing.T) {
+	corps := []byte(`{"model":"gpt-6","messages":[{"role":"system","content":"s"},{"role":"user","content":"premier"},{"role":"assistant","content":"a"},{"role":"user","content":"dernier"}]}`)
+	out := string(AppendUserNote(corps, "NOTE"))
+	if !contains(out, `"dernier\n\nNOTE"`) {
+		t.Fatalf("la note doit fermer le dernier message utilisateur : %s", out)
+	}
+	if !contains(out, `"premier"`) {
+		t.Fatalf("le message précédent doit rester intact : %s", out)
+	}
+	// Contenu en blocs : la note devient un bloc de texte.
+	corps2 := []byte(`{"messages":[{"role":"user","content":[{"type":"text","text":"salut"}]}]}`)
+	out2 := string(AppendUserNote(corps2, "NOTE"))
+	if !contains(out2, `"text":"NOTE"`) {
+		t.Fatalf("la note doit être ajoutée comme bloc : %s", out2)
+	}
+}

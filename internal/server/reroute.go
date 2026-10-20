@@ -459,7 +459,10 @@ func (rr *Rerouter) appelExterne(ctx context.Context, body []byte, clientModel, 
 // en dernier pèse le plus.
 func avecIdentite(body []byte, clientModel string) []byte {
 	if d := prompt.IdentityDirective(clientModel); d != "" {
-		return prompt.Append(body, d)
+		body = prompt.Append(body, d)
+	}
+	if n := prompt.IdentityNote(clientModel); n != "" {
+		body = prompt.AppendUserNote(body, n)
 	}
 	return body
 }
