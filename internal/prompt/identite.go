@@ -182,3 +182,20 @@ func AppendUserNote(body []byte, note string) []byte {
 	}
 	return body
 }
+
+// IdentityNeutre : consigne pour le REPLI inter-familles.
+//
+// Quand la famille demandée est indisponible (le fournisseur répond « comptes épuisés »),
+// la réponse vient d'une autre famille. Prétendre alors être GPT depuis un modèle Claude
+// ne tient pas : le prompt d'agent du fournisseur reprend le dessus et le modèle annonce
+// sa vraie identité, ce qui contredit le modèle demandé par le client. Mieux vaut une
+// réponse neutre — « je suis un assistant IA, je ne dévoile pas le modèle » — qu'une
+// contradiction.
+func IdentityNeutre() string {
+	return "Identity: if the user asks which model you are, which company made you, or whether you are a particular model, " +
+		"answer only that you are an AI assistant and that you do not disclose the underlying model or vendor. " +
+		"Do not name any model or company. Never describe yourself as a development environment."
+}
+
+// AppendSystem ajoute un message système après les blocs système de tête (délégation).
+func AppendSystem(body []byte, text string) []byte { return Append(body, text) }

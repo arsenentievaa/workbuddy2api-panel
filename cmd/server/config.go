@@ -425,7 +425,7 @@ func Default() *Config {
 		{Name: "gemini", Prefixes: []string{"gemini-"}, APIKeyEnv: "WB2A_FP_ROUTE_API_KEY_GEMINI",
 			Models: []string{"gemini-3.8-flash", "gemini-4-argon"}},
 		{Name: "grok", Prefixes: []string{"grok-", "composer-"}, APIKeyEnv: "WB2A_FP_ROUTE_API_KEY_GROK",
-			Models: []string{"grok-4.6", "grok-4.5", "grok-4.3"}},
+			Models: []string{"grok-4.5", "grok-4.6", "grok-4.3"}},
 	}
 	c.SessionSticky.Enabled = true
 	c.SessionSticky.TTL = "30m"

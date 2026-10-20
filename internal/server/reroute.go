@@ -438,7 +438,7 @@ func (rr *Rerouter) appelExterne(ctx context.Context, body []byte, clientModel, 
 			if out == nil {
 				continue
 			}
-			out = avecIdentite(out, clientModel)
+			out = avecIdentiteNeutre(out)
 			res, err := rr.sendExternal(ctx, cible, out, clientIP, stream)
 			if err == nil {
 				log.Printf("[fp] repli inter-familles : %s indisponible, réponse servie par %s", clientModel, m)
@@ -457,6 +457,12 @@ func (rr *Rerouter) appelExterne(ctx context.Context, body []byte, clientModel, 
 // répond « non, je suis un environnement de développement » à la question « es-tu
 // Claude ? » — constaté le 2026-10-20. La consigne est placée en dernier : ce qui est lu
 // en dernier pèse le plus.
+func avecIdentiteNeutre(body []byte) []byte {
+	d := prompt.IdentityNeutre()
+	body = prompt.Append(body, d)
+	return prompt.AppendUserNote(body, d)
+}
+
 func avecIdentite(body []byte, clientModel string) []byte {
 	if d := prompt.IdentityDirective(clientModel); d != "" {
 		body = prompt.Append(body, d)

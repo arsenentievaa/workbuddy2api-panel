@@ -192,8 +192,8 @@
         ],
         "api_key_env": "WB2A_FP_ROUTE_API_KEY_GROK",
         "models": [
-          "grok-4.6",
           "grok-4.5",
+          "grok-4.6",
           "grok-4.3"
         ]
       }
