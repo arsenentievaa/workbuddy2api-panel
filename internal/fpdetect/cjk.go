@@ -90,9 +90,11 @@ const (
 	// dans une question française) désarmait la détection : le client recevait ensuite
 	// une réponse entièrement chinoise sans que rien ne réagisse (trou constaté le
 	// 2026-10-20). Une citation courte ne fait pas de l'utilisateur un sinophone.
-	userCJKMinShare = 0.30
+	userCJKMinShare = 0.20
 	// Une part significative de CJK suffit : un client bilingue qui écrit un message
-	// mélangé attend une réponse dans la langue de son message, pas une erreur.
+	// mélangé attend une réponse dans la langue de son message, pas une erreur. Le seuil
+	// est bas (20 %) parce que ces clients écrivent souvent une phrase latine courte
+	// suivie d'une demande en chinois.
 	userCJKMinRunes = 6
 
 	// Réponse courte : « 好的 », « 你好 » — deux caractères suffisent quand la réponse
