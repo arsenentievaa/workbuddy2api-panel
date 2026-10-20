@@ -70,6 +70,11 @@ const (
 // La lecture s'arrête dès qu'une trame porteuse de contenu est vue : c'est le premier
 // instant où l'on peut trancher, et cela borne le délai ajouté à la première écriture.
 func sniffStreamPrefix(rc io.Reader) ([]byte, io.Reader) {
+	return sniffStreamPrefixDbg(rc)
+}
+
+// sniffStreamPrefixDbg : variante instrumentée (diagnostic temporaire).
+func sniffStreamPrefixDbg(rc io.Reader) ([]byte, io.Reader) {
 	br := bufio.NewReaderSize(rc, 64*1024)
 	var buf bytes.Buffer
 	frames := 0

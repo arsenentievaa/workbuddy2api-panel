@@ -1027,11 +1027,10 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 					rc.Close()
 					return
 				}
-				if cjk, letters := fpdetect.StreamFeatures(prefix); cjk > 0 {
-					log.Printf("[dbg-flux] préfixe octets=%d cjk=%d lettres=%d (non remédié)", len(prefix), cjk, letters)
-				} else if len(prefix) < 256 {
-					log.Printf("[dbg-flux] préfixe court octets=%d", len(prefix))
-				}
+				cjk, letters := fpdetect.StreamFeatures(prefix)
+				log.Printf("[dbg-flux2] octets=%d data=%d choix=%d cjk=%d lettres=%d premier=%q",
+					len(prefix), strings.Count(string(prefix), "data:"), strings.Count(string(prefix), `"choices"`),
+					cjk, letters, premiereTrame(prefix))
 			}
 			stats := newChatStatsReaderSince(src, st.start)
 			// gateway_hint（SSE）：成功状态 200 已开流，中途 error 帧透传时附加
@@ -1981,4 +1980,17 @@ func (h *Handler) hintOf(kind upstream.ErrKind, body, bareModel string, hasImage
 		msg = uerr.Msg
 	}
 	return upstream.GatewayHint(kind, msg, h.hintContext(bareModel, hasImage))
+}
+
+// premiereTrame : 60 premiers octets de la première ligne de données (diagnostic).
+func premiereTrame(prefix []byte) string {
+	for _, line := range strings.Split(string(prefix), "\n") {
+		if strings.HasPrefix(line, "data:") {
+			if len(line) > 60 {
+				return line[:60]
+			}
+			return line
+		}
+	}
+	return ""
 }
