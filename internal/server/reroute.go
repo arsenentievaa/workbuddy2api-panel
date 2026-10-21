@@ -12,6 +12,7 @@ import (
 	"log"
 	"net/http"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/linguo2625469/workbuddy2api-panel/internal/alert"
@@ -82,6 +83,11 @@ type Rerouter struct {
 	// RateAlertPercent / RateMinSample : surveillance du taux de reroutage.
 	RateAlertPercent float64
 	RateMinSample    int64
+
+	// Compteurs d'usage du fournisseur externe (diagnostic) : nombre d'appels réellement
+	// partis, octets de prompt envoyés et raison. Sans eux, la seule façon de savoir ce que
+	// coûte l'anti-détection était de demander au tableau de bord du fournisseur.
+	Usage RerouteUsage
 
 	Upstream *upstream.Client
 	Health   *upstream.ExternalHealth
@@ -175,6 +181,68 @@ func (rr *Rerouter) modelesPour(clientModel string) []string {
 }
 
 // healthFor : verdict de santé de la famille concernée.
+// noteExternal : enregistre un depart vers le fournisseur externe.
+//
+// On compte les departs REUSSIS pour la facture (un refus 4xx n'est generalement pas facture) et
+// tous les echecs a part, pour distinguer « le fournisseur coute cher » de « il est en panne ».
+func (rr *Rerouter) noteExternal(reason string, promptBytes int, err error) {
+	if err != nil {
+		rr.Usage.FailCalls.Add(1)
+		return
+	}
+	if reason == "leak" {
+		rr.Usage.LeakCalls.Add(1)
+		rr.Usage.LeakBytes.Add(int64(promptBytes))
+		return
+	}
+	rr.Usage.ProbeCalls.Add(1)
+	rr.Usage.ProbeBytes.Add(int64(promptBytes))
+}
+
+// RerouteUsage : compteurs d'appels au fournisseur externe, par raison.
+//
+// Deux raisons, et elles seules : une SONDE d'authenticité (le client demande si le modèle est
+// bien celui qu'il a commandé) et le REMÈDE d'une fuite de langue (le parc a répondu en chinois).
+// Les octets comptés sont ceux du prompt envoyé : à 4 octets par jeton environ, c'est l'ordre de
+// grandeur de la facture, et il suffit à voir quelle raison coûte.
+type RerouteUsage struct {
+	ProbeCalls  atomic.Int64
+	ProbeBytes  atomic.Int64
+	LeakCalls   atomic.Int64
+	LeakBytes   atomic.Int64
+	FailCalls   atomic.Int64
+	FallbackHit atomic.Int64
+}
+
+// Snapshot : lecture cohérente pour /status.
+func (u *RerouteUsage) Snapshot() map[string]any {
+	probe, leak := u.ProbeCalls.Load(), u.LeakCalls.Load()
+	probeB, leakB := u.ProbeBytes.Load(), u.LeakBytes.Load()
+	total := probe + leak
+	// Estimation de jetons : 4 octets par jeton, arrondi au millier. C'est une estimation
+	// assumée : le fournisseur ne renvoie pas toujours l'usage, et on veut un ordre de grandeur.
+	estTok := func(b int64) int64 { return (b / 4 / 1000) * 1000 }
+	moyenne := func(b, n int64) int64 {
+		if n == 0 {
+			return 0
+		}
+		return b / n
+	}
+	return map[string]any{
+		"probe_calls":         probe,
+		"probe_prompt_bytes":  probeB,
+		"probe_avg_bytes":     moyenne(probeB, probe),
+		"leak_calls":          leak,
+		"leak_prompt_bytes":   leakB,
+		"leak_avg_bytes":      moyenne(leakB, leak),
+		"total_calls":         total,
+		"total_prompt_tokens": estTok(probeB + leakB),
+		"failed_calls":        u.FailCalls.Load(),
+		"cross_family_hits":   u.FallbackHit.Load(),
+		"probe_share_percent": map[bool]float64{true: 100 * float64(probe) / float64(total), false: 0}[total > 0],
+	}
+}
+
 func (rr *Rerouter) healthFor(clientModel string) *upstream.ExternalHealth {
 	if f := rr.familyFor(clientModel); f != nil && f.Health != nil {
 		return f.Health
@@ -379,7 +447,7 @@ func (rr *Rerouter) DecideLeak(ctx context.Context, key string, now time.Time, c
 // famille répond. Trois essais au plus, pour borner le coût et la latence.
 // messagesPath = true bascule sur l'endpoint Anthropic du même fournisseur.
 func (rr *Rerouter) appelExterne(ctx context.Context, body []byte, clientModel, clientIP string,
-	stream, messagesPath bool) (*upstream.ExternalResult, string, error) {
+	stream, messagesPath bool, reason string) (*upstream.ExternalResult, string, error) {
 
 	target := rr.targetFor(clientModel)
 	if messagesPath {
@@ -394,6 +462,7 @@ func (rr *Rerouter) appelExterne(ctx context.Context, body []byte, clientModel, 
 			return nil, "", fmt.Errorf("modèle indisponible")
 		}
 		res, err := rr.sendExternal(ctx, target, sentBody, clientIP, stream)
+		rr.noteExternal(reason, len(sentBody), err)
 		return res, outModel, err
 	}
 	models := rr.modelesPour(clientModel)
@@ -413,6 +482,7 @@ func (rr *Rerouter) appelExterne(ctx context.Context, body []byte, clientModel, 
 		}
 		out = avecIdentite(out, clientModel)
 		res, err := rr.sendExternal(ctx, target, out, clientIP, stream)
+		rr.noteExternal(reason, len(out), err)
 		if err == nil {
 			return res, m, nil
 		}
@@ -429,7 +499,10 @@ func (rr *Rerouter) appelExterne(ctx context.Context, body []byte, clientModel, 
 		case <-time.After(500 * time.Millisecond):
 		}
 		if out := rr.outboundBodyFor(body, clientModel, models[0]); out != nil && !time.Now().After(limite) {
-			if res, err := rr.sendExternal(ctx, target, avecIdentite(out, clientModel), clientIP, stream); err == nil {
+			derniere := avecIdentite(out, clientModel)
+			res, err := rr.sendExternal(ctx, target, derniere, clientIP, stream)
+			rr.noteExternal(reason, len(derniere), err)
+			if err == nil {
 				return res, models[0], nil
 			}
 		}
@@ -455,7 +528,9 @@ func (rr *Rerouter) appelExterne(ctx context.Context, body []byte, clientModel, 
 			}
 			out = avecIdentiteNeutre(out)
 			res, err := rr.sendExternal(ctx, cible, out, clientIP, stream)
+			rr.noteExternal(reason, len(out), err)
 			if err == nil {
+				rr.Usage.FallbackHit.Add(1)
 				log.Printf("[fp] repli inter-familles : %s indisponible, réponse servie par %s", clientModel, m)
 				return res, m, nil
 			}
@@ -509,7 +584,7 @@ func (rr *Rerouter) familyParNom(nom string) *Family {
 func (rr *Rerouter) Try(ctx context.Context, w http.ResponseWriter, r *http.Request,
 	body []byte, clientModel string, stream bool, st *chatStat, key string) bool {
 
-	res, outModel, err := rr.appelExterne(ctx, body, clientModel, upstream.ExtractClientIP(r), stream, false)
+	res, outModel, err := rr.appelExterne(ctx, body, clientModel, upstream.ExtractClientIP(r), stream, false, "probe")
 	if err != nil {
 		// Jamais le corps d'erreur du fournisseur : il décrit une infrastructure dont
 		// l'existence est précisément ce que la sonde cherche. Seul le code HTTP est
@@ -875,7 +950,7 @@ func (h *Handler) anthropicMessages(w http.ResponseWriter, r *http.Request) {
 func (rr *Rerouter) tryAnthropic(ctx context.Context, w http.ResponseWriter, r *http.Request,
 	body []byte, clientModel string, stream bool, st *chatStat) bool {
 
-	res, outModel, err := rr.appelExterne(ctx, body, clientModel, upstream.ExtractClientIP(r), stream, true)
+	res, outModel, err := rr.appelExterne(ctx, body, clientModel, upstream.ExtractClientIP(r), stream, true, "probe")
 	if err != nil {
 		status := 0
 		if se, ok := err.(interface{ Status() int }); ok {

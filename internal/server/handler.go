@@ -269,6 +269,9 @@ func (h *Handler) status(w http.ResponseWriter, r *http.Request) {
 			}
 			rr := h.cfg.Rerouter
 			return map[string]any{
+				// Compteurs d'usage du fournisseur externe : ce que coute l'anti-detection,
+				// separe entre sondes d'authenticite et remedes de fuite de langue.
+				"usage":          rr.Usage.Snapshot(),
 				"enabled":        rr.Enabled,
 				"dry_run":        rr.DryRun,
 				"health":         rr.Health.Snapshot(),

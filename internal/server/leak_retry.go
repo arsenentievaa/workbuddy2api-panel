@@ -243,7 +243,7 @@ func (h *Handler) tryExternalVerified(w http.ResponseWriter, r *http.Request, or
 	if rr == nil {
 		return false
 	}
-	res, _, err := rr.appelExterne(r.Context(), outbound, clientModel, upstream.ExtractClientIP(r), stream, false)
+	res, _, err := rr.appelExterne(r.Context(), outbound, clientModel, upstream.ExtractClientIP(r), stream, false, "leak")
 	if err != nil {
 		status := 0
 		if se, ok := err.(interface{ Status() int }); ok {

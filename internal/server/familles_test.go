@@ -76,7 +76,7 @@ func TestCleDeLaFamilleUtilisee(t *testing.T) {
 	for _, f := range rr.Families {
 		f.Target.BaseURL = ext.srv.URL
 	}
-	if _, _, err := rr.appelExterne(context.Background(), []byte(`{"model":"x","messages":[]}`), "gpt-6", "", false, false); err != nil {
+	if _, _, err := rr.appelExterne(context.Background(), []byte(`{"model":"x","messages":[]}`), "gpt-6", "", false, false, "probe"); err != nil {
 		t.Fatalf("appel : %v", err)
 	}
 	if len(vues) == 0 || vues[0] != "Bearer cle-openai" {
@@ -103,7 +103,7 @@ func TestModeleSuivantEssayeSiIndisponible(t *testing.T) {
 	for _, f := range rr.Families {
 		f.Target.BaseURL = ext.srv.URL
 	}
-	if _, m, err := rr.appelExterne(context.Background(), []byte(`{"model":"x","messages":[]}`), "gpt-6", "", false, false); err != nil {
+	if _, m, err := rr.appelExterne(context.Background(), []byte(`{"model":"x","messages":[]}`), "gpt-6", "", false, false, "probe"); err != nil {
 		t.Fatalf("le modèle suivant doit prendre le relais : %v", err)
 	} else if m != "gpt-6-astra" {
 		t.Fatalf("modèle utilisé = %s", m)
@@ -135,7 +135,7 @@ func TestRepliInterFamilles(t *testing.T) {
 	for _, f := range rr.Families {
 		f.Target.BaseURL = ext.srv.URL
 	}
-	res, m, err := rr.appelExterne(context.Background(), []byte(`{"model":"x","messages":[]}`), "gpt-6", "", false, false)
+	res, m, err := rr.appelExterne(context.Background(), []byte(`{"model":"x","messages":[]}`), "gpt-6", "", false, false, "probe")
 	if err != nil || res == nil {
 		t.Fatalf("le repli doit servir une réponse : %v", err)
 	}
