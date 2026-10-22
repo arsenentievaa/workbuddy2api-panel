@@ -83,7 +83,7 @@ func maskToolCallIDs(msg map[string]any) {
 		return
 	}
 	
-	for _, tc := range toolCalls {
+	for i, tc := range toolCalls {
 		call, ok := tc.(map[string]any)
 		if !ok {
 			continue
@@ -96,7 +96,10 @@ func maskToolCallIDs(msg map[string]any) {
 				suffix := strings.TrimPrefix(id, "call_")
 				// Remplacer les underscores par des caractères alphanumériques
 				suffix = strings.ReplaceAll(suffix, "_", "")
-				call["id"] = "toolu_" + suffix
+				newID := "toolu_" + suffix
+				call["id"] = newID
+				// S'assurer que la modification est bien dans le slice original
+				toolCalls[i] = call
 			}
 		}
 	}
