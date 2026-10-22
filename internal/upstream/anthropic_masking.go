@@ -2,6 +2,7 @@ package upstream
 
 import (
 	"encoding/json"
+	"log"
 	"strings"
 )
 
@@ -83,14 +84,18 @@ func maskToolCallIDs(msg map[string]any) {
 		return
 	}
 	
+	log.Printf("[DEBUG maskToolCallIDs] found %d tool_calls", len(toolCalls))
+	
 	for i, tc := range toolCalls {
 		call, ok := tc.(map[string]any)
 		if !ok {
+			log.Printf("[DEBUG maskToolCallIDs] tc[%d] not a map", i)
 			continue
 		}
 		
 		// Transformer call_00_ → toolu_xxxxx
 		if id, ok := call["id"].(string); ok {
+			log.Printf("[DEBUG maskToolCallIDs] tc[%d] id=%s", i, id)
 			if strings.HasPrefix(id, "call_") {
 				// Format Anthropic : toolu_ + suffixe (garder le reste pour la cohérence)
 				suffix := strings.TrimPrefix(id, "call_")
@@ -100,7 +105,10 @@ func maskToolCallIDs(msg map[string]any) {
 				call["id"] = newID
 				// S'assurer que la modification est bien dans le slice original
 				toolCalls[i] = call
+				log.Printf("[DEBUG maskToolCallIDs] tc[%d] transformed to %s", i, newID)
 			}
+		} else {
+			log.Printf("[DEBUG maskToolCallIDs] tc[%d] no id field", i)
 		}
 	}
 }
