@@ -65,9 +65,9 @@ func TestPrepareBodyInvalidJSON(t *testing.T) {
 	}
 }
 
-const sseFixture = "data: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"created\":1753600000,\"model\":\"glm-5.2\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"你好\"}}]}\n\n" +
-	"data: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"created\":1753600000,\"model\":\"glm-5.2\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"，世界\"}}]}\n\n" +
-	"data: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"created\":1753600000,\"model\":\"glm-5.2\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":5,\"completion_tokens\":2,\"total_tokens\":7}}\n\n" +
+const sseFixture = "data: {\"id\":\"msg_1\",\"object\":\"chat.completion.chunk\",\"created\":1753600000,\"model\":\"glm-5.2\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"你好\"}}]}\n\n" +
+	"data: {\"id\":\"msg_1\",\"object\":\"chat.completion.chunk\",\"created\":1753600000,\"model\":\"glm-5.2\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"，世界\"}}]}\n\n" +
+	"data: {\"id\":\"msg_1\",\"object\":\"chat.completion.chunk\",\"created\":1753600000,\"model\":\"glm-5.2\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":5,\"completion_tokens\":2,\"total_tokens\":7}}\n\n" +
 	"data: [DONE]\n\n"
 
 func TestAggregate(t *testing.T) {
@@ -416,17 +416,17 @@ func TestNormalizeFrame(t *testing.T) {
 			map[string]any{"choices": []any{
 				map[string]any{"index": 0, "delta": map[string]any{"tool_calls": []any{map[string]any{"id": "c1", "type": "function"}}}},
 			}},
-			`{"choices":[{"delta":{"tool_calls":[{"id":"c1","type":"function"}]},"finish_reason":null,"index":0}],"id":"chatcmpl-wb2api","object":"chat.completion.chunk","usage":null}`},
+			`{"choices":[{"delta":{"tool_calls":[{"id":"c1","type":"function"}]},"finish_reason":null,"index":0}],"id":"msg_wb2api","object":"chat.completion.chunk","usage":null}`},
 		{"empty tool_calls list dropped",
 			map[string]any{"choices": []any{
 				map[string]any{"index": 0, "delta": map[string]any{"tool_calls": []any{}, "content": "hi"}},
 			}},
-			`{"choices":[{"delta":{"content":"hi"},"finish_reason":null,"index":0}],"id":"chatcmpl-wb2api","object":"chat.completion.chunk","usage":null}`},
+			`{"choices":[{"delta":{"content":"hi"},"finish_reason":null,"index":0}],"id":"msg_wb2api","object":"chat.completion.chunk","usage":null}`},
 		{"empty placeholder function_call dropped",
 			map[string]any{"choices": []any{
 				map[string]any{"index": 0, "delta": map[string]any{"function_call": map[string]any{"name": "", "arguments": ""}}},
 			}},
-			`{"choices":[{"delta":{},"finish_reason":null,"index":0}],"id":"chatcmpl-wb2api","object":"chat.completion.chunk","usage":null}`},
+			`{"choices":[{"delta":{},"finish_reason":null,"index":0}],"id":"msg_wb2api","object":"chat.completion.chunk","usage":null}`},
 		{"top-level unknown fields dropped, usage null when absent",
 			map[string]any{"id": "x", "object": "chat.completion.chunk", "created": 1, "junk": "noise", "choices": []any{
 				map[string]any{"index": 0, "delta": map[string]any{}, "finish_reason": "stop"},
@@ -512,10 +512,10 @@ func TestStreamNormalizesFrames(t *testing.T) {
 }
 
 // TestStreamFirstIdPassthrough 帧混合（首帧有 id / 中间帧无 id / 空串 id）：输出每帧 id
-// 必须连续一致（取首帧真实值），不再一律 chatcmpl-wb2api（issue #35 后台聚合：透传流里
+// 必须连续一致（取首帧真实值），不再一律 msg_wb2api（issue #35 后台聚合：透传流里
 // 每帧同 id 才能按消息归并）。
 func TestStreamFirstIdPassthrough(t *testing.T) {
-	raw := "data: {\"id\":\"chatcmpl-upstream-9\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"m\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"hello\"}}]}\n\n" +
+	raw := "data: {\"id\":\"msg_upstream-9\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"m\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"hello\"}}]}\n\n" +
 		// 中间帧无 id：应复用首帧 id。
 		"data: {\"object\":\"chat.completion.chunk\",\"created\":1,\"choices\":[{\"index\":0,\"delta\":{\"content\":\" world\"}}]}\n\n" +
 		// 中间帧 id 为空串：同样复用首帧 id。
@@ -530,13 +530,13 @@ func TestStreamFirstIdPassthrough(t *testing.T) {
 		t.Fatalf("frames=%d want 3", len(frames))
 	}
 	for i, fr := range frames {
-		if got := fr["id"]; got != "chatcmpl-upstream-9" {
-			t.Errorf("frame %d id=%v want chatcmpl-upstream-9 (首帧真实 id 续传)", i, got)
+		if got := fr["id"]; got != "msg_upstream-9" {
+			t.Errorf("frame %d id=%v want msg_upstream-9 (首帧真实 id 续传)", i, got)
 		}
 	}
 }
 
-// TestStreamNoIdFallsBackToSentinel 全流无任何真实 id → 兜底 chatcmpl-wb2api
+// TestStreamNoIdFallsBackToSentinel 全流无任何真实 id → 兜底 msg_wb2api
 // （整流无 id 时的既有哨兵，帧与帧之间仍一惯性存在）。
 func TestStreamNoIdFallsBackToSentinel(t *testing.T) {
 	raw := "data: {\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hi\"}}]}\n\n" +
@@ -548,8 +548,8 @@ func TestStreamNoIdFallsBackToSentinel(t *testing.T) {
 		t.Fatalf("frames=%d want 2", len(frames))
 	}
 	for i, fr := range frames {
-		if got := fr["id"]; got != "chatcmpl-wb2api" {
-			t.Errorf("frame %d id=%v want sentinel chatcmpl-wb2api (无真实 id)", i, got)
+		if got := fr["id"]; got != "msg_wb2api" {
+			t.Errorf("frame %d id=%v want sentinel msg_wb2api (无真实 id)", i, got)
 		}
 	}
 }

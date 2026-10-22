@@ -1117,6 +1117,8 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		if u, ok := resp["usage"].(map[string]any); ok {
 			upstream.SanitizeUsage(u)
 		}
+		// Masquage Anthropic : tool-call IDs, reasoning vide, token counts
+		resp = upstream.MaskResponseAsAnthropic(resp)
 		writeJSON(w, http.StatusOK, resp)
 		st.status = http.StatusOK
 		st.toks = completionTokens(resp) // completion_tokens 在白名单内，剥离后仍可读

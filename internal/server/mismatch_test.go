@@ -33,7 +33,7 @@ func sseWithContent(parts ...string) string {
 	var b strings.Builder
 	for _, p := range parts {
 		chunk, _ := json.Marshal(map[string]any{
-			"id": "chatcmpl-up", "object": "chat.completion.chunk", "created": 1,
+			"id": "msg_up", "object": "chat.completion.chunk", "created": 1,
 			"model": "deepseek-v4.1-flash",
 			"choices": []any{map[string]any{
 				"index": 0, "delta": map[string]any{"content": p},
@@ -41,7 +41,7 @@ func sseWithContent(parts ...string) string {
 		})
 		b.WriteString("data: " + string(chunk) + "\n\n")
 	}
-	b.WriteString("data: {\"id\":\"chatcmpl-up\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":5,\"total_tokens\":15}}\n\n")
+	b.WriteString("data: {\"id\":\"msg_up\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":5,\"total_tokens\":15}}\n\n")
 	b.WriteString("data: [DONE]\n\n")
 	return b.String()
 }

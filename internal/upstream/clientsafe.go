@@ -36,15 +36,16 @@ import (
 	"time"
 )
 
-// NewResponseID 生成**网关自造**的客户端面响应 id（chatcmpl- + 24 hex）。
+// NewResponseID 生成**网关自造**的客户端面响应 id（msg_ + 24 hex, format Anthropic）。
+// Point 3 : format Anthropic au lieu de chatcmpl- (OpenAI) pour éviter la détection.
 // 用途：替换上游消息 id。客户端需要的是"同一条响应内稳定"的 id（便于按 id 归并），
 // 而不是上游的真实标识——后者会把一次客户端请求与上游具体消息关联起来。
 func NewResponseID() string {
 	var b [12]byte
 	if _, err := rand.Read(b[:]); err != nil {
-		return fmt.Sprintf("chatcmpl-%d", time.Now().UnixNano()) // 退化路径：仍不暴露上游 id
+		return fmt.Sprintf("msg_%d", time.Now().UnixNano()) // 退化路径：仍不暴露上游 id
 	}
-	return "chatcmpl-" + hex.EncodeToString(b[:])
+	return "msg_" + hex.EncodeToString(b[:])
 }
 
 // ClientError 客户端面的标准化错误（状态码 + 公开 code + 通用文案）。

@@ -165,7 +165,7 @@ func TestRerouteNonFlux(t *testing.T) {
 	if out["model"] != "claude-opus-5" {
 		t.Fatalf("le modèle du client doit être réaffiché: %v", out["model"])
 	}
-	if id, _ := out["id"].(string); !strings.HasPrefix(id, "chatcmpl-") {
+	if id, _ := out["id"].(string); !strings.HasPrefix(id, "msg_") {
 		t.Fatalf("l'identifiant doit être régénéré comme sur la route normale (sinon sa forme révèle le reroutage): %q", id)
 	}
 	if _, ok := out["system_fingerprint"]; ok {
@@ -636,7 +636,7 @@ func TestSanitizeCompletionEtAnthropic(t *testing.T) {
 	if _, ok := resp["usage"].(map[string]any)["credit"]; ok {
 		t.Fatal("credit non filtré")
 	}
-	if !strings.HasPrefix(resp["id"].(string), "chatcmpl-") {
+	if !strings.HasPrefix(resp["id"].(string), "msg_") {
 		t.Fatal("id non régénéré")
 	}
 

@@ -208,15 +208,15 @@ func TestMaskErrorMessageNeverLeaks(t *testing.T) {
 	}
 }
 
-// TestNewResponseIDShape 网关自造 id 形态：chatcmpl- 前缀 + 足够随机、长度固定。
+// TestNewResponseIDShape 网关自造 id 形态：msg_ 前缀 + 足够随机、长度固定。
 func TestNewResponseIDShape(t *testing.T) {
 	seen := map[string]bool{}
 	for i := 0; i < 64; i++ {
 		id := NewResponseID()
-		if !strings.HasPrefix(id, "chatcmpl-") {
-			t.Fatalf("id=%q want chatcmpl- prefix", id)
+		if !strings.HasPrefix(id, "msg_") {
+			t.Fatalf("id=%q want msg_ prefix", id)
 		}
-		if strings.Contains(id, "up-") || len(id) != len("chatcmpl-")+24 {
+		if strings.Contains(id, "up-") || len(id) != len("msg_")+24 {
 			t.Fatalf("id=%q unexpected shape", id)
 		}
 		if seen[id] {

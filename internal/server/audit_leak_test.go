@@ -87,7 +87,7 @@ func TestResponseModelDoesNotLeakBackend(t *testing.T) {
 				}
 			}
 			id, _ := resp["id"].(string)
-			if !strings.HasPrefix(id, "chatcmpl-") {
+			if !strings.HasPrefix(id, "msg_") {
 				t.Errorf("id=%q must be a gateway-generated id", id)
 			}
 		})

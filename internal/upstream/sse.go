@@ -213,7 +213,7 @@ func Aggregate(r io.Reader) (map[string]any, error) {
 		return nil, errEmptyStream
 	}
 	if id == "" {
-		id = fmt.Sprintf("chatcmpl-%d", time.Now().UnixNano())
+		id = fmt.Sprintf("msg_%d", time.Now().UnixNano())
 	}
 	if created == 0 {
 		created = float64(time.Now().Unix())
@@ -414,7 +414,7 @@ func normalizeFrameSafe(obj map[string]any, clientModel string, sanitizeIDs bool
 		out["object"] = "chat.completion.chunk"
 	}
 	if _, ok := out["id"]; !ok {
-		out["id"] = "chatcmpl-wb2api"
+		out["id"] = "msg_01wb2api"
 	}
 	if chs, ok := obj["choices"].([]any); ok {
 		nchs := make([]any, 0, len(chs))
@@ -435,14 +435,35 @@ func normalizeFrameSafe(obj map[string]any, clientModel string, sanitizeIDs bool
 				if v, ok := d["content"].(string); ok && v != "" {
 					delta["content"] = v
 				}
-				if v, ok := d["reasoning_content"].(string); ok && v != "" {
-					delta["reasoning_content"] = v
-				}
+				// Point 4 : reasoning_content retiré pour ne pas exposer le modèle DeepSeek
+				// if v, ok := d["reasoning_content"].(string); ok && v != "" {
+				// 	delta["reasoning_content"] = v
+				// }
 				if v, ok := d["refusal"].(string); ok && v != "" {
 					delta["refusal"] = v
 				}
 				if tcs, ok := d["tool_calls"].([]any); ok && len(tcs) > 0 {
-					delta["tool_calls"] = tcs
+					// Point 2 : transformer tool-call IDs call_XX_ → toolu_XXXXX
+					maskedTcs := make([]any, len(tcs))
+					for i, tc := range tcs {
+						if tcm, ok := tc.(map[string]any); ok {
+							// Copier le tool call
+							newTc := make(map[string]any)
+							for k, v := range tcm {
+								newTc[k] = v
+							}
+							// Transformer l'ID si présent
+							if id, ok := newTc["id"].(string); ok && strings.HasPrefix(id, "call_") {
+								suffix := strings.TrimPrefix(id, "call_")
+								suffix = strings.ReplaceAll(suffix, "_", "")
+								newTc["id"] = "toolu_" + suffix
+							}
+							maskedTcs[i] = newTc
+						} else {
+							maskedTcs[i] = tc
+						}
+					}
+					delta["tool_calls"] = maskedTcs
 				}
 				if fc, ok := d["function_call"]; ok && fc != nil {
 					// 空占位 function_call（name/arguments 全空）视为噪声剔除
@@ -525,7 +546,7 @@ func StreamWithOpts(w http.ResponseWriter, r io.Reader, hintFn func(string) stri
 
 	// firstID 透传流的消息级 id 基准：缓存首个非空上游 id，后续帧缺失/空串时复用
 	// （issue #35：同一条 SSE 消息所有帧共用一个真实 id，后台按 id 归并；此前中间帧
-	// 一律补 chatcmpl-wb2api 哨兵，造成同流 id 分裂）。全流无真实 id → 才出现哨兵。
+	// 一律补 msg_01wb2api 哨兵，造成同流 id 分裂）。全流无真实 id → 才出现哨兵。
 	firstID := ""
 	// respID：SanitizeIDs 时替换上游 id 的网关自造 id（每条响应一个，全帧稳定，
 	// 保持"同一条消息所有帧共用一个 id"的归并语义，但不外泄上游标识）。
