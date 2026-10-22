@@ -25,9 +25,9 @@ func TestMaskResponseAsAnthropic_IDsAndToolCalls(t *testing.T) {
 			},
 		},
 		"usage": map[string]any{
-			"prompt_tokens":         float64(10),
-			"completion_tokens":     float64(2),
-			"reasoning_tokens":      float64(7),
+			"prompt_tokens":             float64(10),
+			"completion_tokens":         float64(2),
+			"reasoning_tokens":          float64(7),
 			"completion_tokens_details": map[string]any{"reasoning_tokens": float64(7)},
 		},
 	}
@@ -94,6 +94,68 @@ func TestMaskResponseAsAnthropic_EmptyWithReasoning(t *testing.T) {
 	content, _ := msg["content"].(string)
 	if strings.TrimSpace(content) == "" {
 		t.Fatal("Point 4 non corrigé : contenu vide après raisonnement")
+	}
+}
+
+// Point 2, forme réelle du chemin non streamé : Aggregate construit tool_calls en
+// []map[string]any et non en []any. La conversion doit s'appliquer à cette forme aussi,
+// sinon les appels synchrones sortent avec des identifiants du backend (call_...).
+func TestMaskResponseAsAnthropic_AggregateShape(t *testing.T) {
+	resp := map[string]any{
+		"id":    "msg_abc",
+		"model": "claude-sonnet-5-5",
+		"choices": []any{
+			map[string]any{
+				"index": 0,
+				"message": map[string]any{
+					"role":    "assistant",
+					"content": "Ok.",
+					"tool_calls": []map[string]any{
+						{"id": "call_00_wFIQ8IB79qJ807Ufcuwf2830", "type": "function",
+							"function": map[string]any{"name": "ping", "arguments": `{"v":1}`}},
+					},
+				},
+			},
+		},
+	}
+
+	out := MaskResponseAsAnthropic(resp)
+	msg, _ := out["choices"].([]any)[0].(map[string]any)["message"].(map[string]any)
+	calls, ok := msg["tool_calls"].([]map[string]any)
+	if !ok || len(calls) != 1 {
+		t.Fatalf("tool_calls attendu 1 dans la forme Aggregate, obtenu %#v", msg["tool_calls"])
+	}
+	if id := calls[0]["id"]; id != "toolu_00wFIQ8IB79qJ807Ufcuwf2830" {
+		t.Fatalf("Point 2 non corrigé sur la forme Aggregate : id=%v", id)
+	}
+}
+
+// Point 2, bout en bout : un flux upstream réel agrégé puis masqué doit sortir en toolu_.
+func TestMaskResponseAsAnthropic_AggregatedStream(t *testing.T) {
+	flux := strings.Join([]string{
+		`data: {"id":"chatcmpl-a","object":"chat.completion.chunk","created":1,"model":"deepseek-v4.1-flash","choices":[{"index":0,"delta":{"role":"assistant","content":""}}]}`,
+		`data: {"id":"chatcmpl-a","object":"chat.completion.chunk","created":1,"model":"deepseek-v4.1-flash","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_00_7XnQ2","type":"function","function":{"name":"lookup","arguments":"{\"q\":1}"}}]}}]}`,
+		`data: {"id":"chatcmpl-a","object":"chat.completion.chunk","created":1,"model":"deepseek-v4.1-flash","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}`,
+		`data: [DONE]`,
+	}, "\n")
+
+	agg, err := Aggregate(strings.NewReader(flux))
+	if err != nil {
+		t.Fatalf("agrégation : %v", err)
+	}
+	out := MaskResponseAsAnthropic(agg)
+	msg, _ := out["choices"].([]any)[0].(map[string]any)["message"].(map[string]any)
+	switch calls := msg["tool_calls"].(type) {
+	case []map[string]any:
+		if len(calls) != 1 || !strings.HasPrefix(calls[0]["id"].(string), "toolu_") {
+			t.Fatalf("Point 2 non corrigé après agrégation : %#v", calls)
+		}
+	case []any:
+		if len(calls) != 1 || !strings.HasPrefix(calls[0].(map[string]any)["id"].(string), "toolu_") {
+			t.Fatalf("Point 2 non corrigé après agrégation : %#v", calls)
+		}
+	default:
+		t.Fatalf("tool_calls absent après agrégation : %#v", msg)
 	}
 }
 

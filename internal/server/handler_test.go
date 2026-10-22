@@ -34,6 +34,14 @@ const sseOK = "data: {\"id\":\"msg_1\",\"object\":\"chat.completion.chunk\",\"cr
 	"data: {\"id\":\"msg_1\",\"object\":\"chat.completion.chunk\",\"created\":1753600000,\"model\":\"glm-5.2\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":1,\"completion_tokens\":1,\"total_tokens\":2}}\n\n" +
 	"data: [DONE]\n\n"
 
+// sseToolCall : flux upstream contenant un appel d'outil avec un identifiant au format
+// du backend (call_...). Sert à vérifier que la réponse non streamée présentée au
+// client porte bien un identifiant Anthropic (toolu_...).
+const sseToolCall = "data: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"deepseek-v4.1-flash\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"\"}}]}\n\n" +
+	"data: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"deepseek-v4.1-flash\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_00_ABCdef123\",\"type\":\"function\",\"function\":{\"name\":\"lookup\",\"arguments\":\"{\\\"q\\\":1}\"}}]}}]}\n\n" +
+	"data: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"deepseek-v4.1-flash\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"tool_calls\"}],\"usage\":{\"prompt_tokens\":3,\"completion_tokens\":2,\"total_tokens\":5}}\n\n" +
+	"data: [DONE]\n\n"
+
 // newFakeUpstream 返回一个 ChatStream 走 fake 的 upstream.Client。
 // fake 依据 Authorization 头决定行为。
 func newFakeUpstream(t *testing.T, behavior func(auth string) (status int, body string, isStream bool)) *upstream.Client {
@@ -233,6 +241,54 @@ func TestChatNonStreamAggregates(t *testing.T) {
 	}
 	if st.TokenUsage.LastLatencyMs < 1 || st.TokenUsage.LastTokensPerSecond == nil || *st.TokenUsage.LastTokensPerSecond <= 0 {
 		t.Errorf("latest performance=%+v", st.TokenUsage)
+	}
+}
+
+// Point 2, de bout en bout : un appel non streamé dont l'upstream renvoie
+// tool_calls.id = call_... doit sortir chez le client avec un identifiant toolu_...
+// (la conversion ne s'appliquait qu'aux réponses relues depuis du JSON, pas à celles
+// construites en mémoire par Aggregate : les appels synchrones fuyaient le format).
+func TestChatNonStreamMasksToolCallIDs(t *testing.T) {
+	up := newFakeUpstream(t, func(authz string) (int, string, bool) {
+		return 200, sseToolCall, true
+	})
+	h := NewHandler(Config{
+		Pool:     testPoolWith(&auth.Auth{UID: "u1", AccessToken: "at1", ExpiresAt: 9999999999}),
+		Upstream: up,
+	})
+	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"claude-sonnet-5-5","messages":[{"role":"user","content":"hi"}],"tools":[{"type":"function","function":{"name":"lookup","parameters":{"type":"object"}}}]}`))
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != 200 {
+		t.Fatalf("code=%d body=%s", rec.Code, rec.Body)
+	}
+	var resp map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("resp not json: %v body=%s", err, rec.Body)
+	}
+	if id, _ := resp["id"].(string); !strings.HasPrefix(id, "msg_") {
+		t.Fatalf("identifiant de réponse non masqué : %v", resp["id"])
+	}
+	msg := resp["choices"].([]any)[0].(map[string]any)["message"].(map[string]any)
+	switch calls := msg["tool_calls"].(type) {
+	case []any:
+		if len(calls) != 1 {
+			t.Fatalf("tool_calls attendu 1, obtenu %d", len(calls))
+		}
+		id, _ := calls[0].(map[string]any)["id"].(string)
+		if !strings.HasPrefix(id, "toolu_") {
+			t.Fatalf("Point 2 non corrigé : identifiant d'outil %q", id)
+		}
+	case []map[string]any:
+		if len(calls) != 1 {
+			t.Fatalf("tool_calls attendu 1, obtenu %d", len(calls))
+		}
+		id, _ := calls[0]["id"].(string)
+		if !strings.HasPrefix(id, "toolu_") {
+			t.Fatalf("Point 2 non corrigé : identifiant d'outil %q", id)
+		}
+	default:
+		t.Fatalf("tool_calls absent de la réponse : %#v", msg)
 	}
 }
 

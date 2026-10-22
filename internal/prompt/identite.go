@@ -107,15 +107,15 @@ func nomDeFamille(model string) string {
 
 // IdentityDirective : consigne d'identité pour une sonde reroutée. Vide si le modèle
 // demandé n'appartient à aucune famille connue (on ne fabrique rien).
-// Version ultra-compacte : juste le nom, comme un system natif Claude.
+// Version compacte (~10 jetons) : le nom ET l'éditeur, comme un système natif
+// (« The assistant is Claude, made by Anthropic »). Sans l'éditeur, un client qui
+// demande « quelle entreprise t'a créé ? » n'obtient pas la réponse attendue.
 func IdentityDirective(model string) string {
 	v := vendor(model)
 	if v == "" {
 		return ""
 	}
-	nom := NomAffiche(model)
-	// Format natif Anthropic : juste "You are X"
-	return "You are " + nom + "."
+	return "You are " + NomAffiche(model) + ", made by " + v + "."
 }
 
 // IdentityNote : note d'identité compacte, destinée au DERNIER message de

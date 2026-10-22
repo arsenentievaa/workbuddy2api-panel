@@ -2,7 +2,6 @@ package upstream
 
 import (
 	"encoding/json"
-	"log"
 	"strings"
 )
 
@@ -12,7 +11,7 @@ func MaskResponseAsAnthropic(resp map[string]any) map[string]any {
 	if resp == nil {
 		return resp
 	}
-	
+
 	// Point 2 & 4 : traiter les choices
 	if choices, ok := resp["choices"].([]any); ok {
 		for _, ch := range choices {
@@ -20,30 +19,30 @@ func MaskResponseAsAnthropic(resp map[string]any) map[string]any {
 			if !ok {
 				continue
 			}
-			
+
 			// Point 2 : transformer tool-call IDs dans message
 			if msg, ok := choice["message"].(map[string]any); ok {
 				maskToolCallIDs(msg)
-				
+
 				// Point 4 : réponse vide avec reasoning → ajouter contenu minimal
 				fixEmptyWithReasoning(msg)
 			}
 		}
 	}
-	
+
 	// Point 5 : ajuster comptages tokens (retirer reasoning_tokens si présent)
 	if usage, ok := resp["usage"].(map[string]any); ok {
 		// Retirer les champs spécifiques aux modèles avec reasoning
 		delete(usage, "reasoning_tokens")
 		delete(usage, "completion_tokens_details")
 	}
-	
+
 	return resp
 }
 
 // MaskAsAnthropic transforme une réponse OpenAI/DeepSeek pour ressembler à Anthropic.
 // Version pour réponses bytes (streaming chunks).
-// 
+//
 // Corrections appliquées :
 // - Point 2 : tool-call IDs call_XX_ → toolu_XXXXX (format Anthropic)
 // - Point 3 : message IDs chatcmpl-XXX → msg_XXXXX (format Anthropic)
@@ -53,23 +52,23 @@ func MaskAsAnthropic(body []byte, isStream bool) []byte {
 	if len(body) == 0 {
 		return body
 	}
-	
+
 	if isStream {
 		return maskStreamChunk(body)
 	}
-	
+
 	var obj map[string]any
 	if err := json.Unmarshal(body, &obj); err != nil {
 		return body
 	}
-	
+
 	// Point 3 : message ID chatcmpl- → msg_
 	if id, ok := obj["id"].(string); ok && strings.HasPrefix(id, "chatcmpl-") {
 		obj["id"] = "msg_" + strings.TrimPrefix(id, "chatcmpl-")
 	}
-	
+
 	obj = MaskResponseAsAnthropic(obj)
-	
+
 	out, err := json.Marshal(obj)
 	if err != nil {
 		return body
@@ -77,52 +76,48 @@ func MaskAsAnthropic(body []byte, isStream bool) []byte {
 	return out
 }
 
-// maskToolCallIDs transforme call_XX_ en toolu_XXXXX dans tool_calls
+// maskToolCallIDs transforme call_XX_ en toolu_XXXXX dans tool_calls.
+//
+// Deux formes coexistent : []any (réponse relue depuis du JSON — chemin streaming) et
+// []map[string]any (réponse construite en mémoire par Aggregate — appels synchrones).
+// Ne traiter que la première laissait passer les identifiants du backend sur tous les
+// appels non streamés : c'était la cause du point 2 resté ouvert, sans erreur ni log.
 func maskToolCallIDs(msg map[string]any) {
-	toolCalls, ok := msg["tool_calls"].([]any)
-	if !ok || len(toolCalls) == 0 {
+	switch toolCalls := msg["tool_calls"].(type) {
+	case []any:
+		for _, tc := range toolCalls {
+			if call, ok := tc.(map[string]any); ok {
+				maskOneToolCallID(call)
+			}
+		}
+	case []map[string]any:
+		for _, call := range toolCalls {
+			maskOneToolCallID(call)
+		}
+	}
+}
+
+// maskOneToolCallID réécrit un identifiant call_... en toolu_... sur place.
+func maskOneToolCallID(call map[string]any) {
+	id, ok := call["id"].(string)
+	if !ok || !strings.HasPrefix(id, "call_") {
 		return
 	}
-	
-	log.Printf("[DEBUG maskToolCallIDs] found %d tool_calls", len(toolCalls))
-	
-	for i, tc := range toolCalls {
-		call, ok := tc.(map[string]any)
-		if !ok {
-			log.Printf("[DEBUG maskToolCallIDs] tc[%d] not a map", i)
-			continue
-		}
-		
-		// Transformer call_00_ → toolu_xxxxx
-		if id, ok := call["id"].(string); ok {
-			log.Printf("[DEBUG maskToolCallIDs] tc[%d] id=%s", i, id)
-			if strings.HasPrefix(id, "call_") {
-				// Format Anthropic : toolu_ + suffixe (garder le reste pour la cohérence)
-				suffix := strings.TrimPrefix(id, "call_")
-				// Remplacer les underscores par des caractères alphanumériques
-				suffix = strings.ReplaceAll(suffix, "_", "")
-				newID := "toolu_" + suffix
-				call["id"] = newID
-				// S'assurer que la modification est bien dans le slice original
-				toolCalls[i] = call
-				log.Printf("[DEBUG maskToolCallIDs] tc[%d] transformed to %s", i, newID)
-			}
-		} else {
-			log.Printf("[DEBUG maskToolCallIDs] tc[%d] no id field", i)
-		}
-	}
+	// Format Anthropic : toolu_ + suffixe sans souligné (marque des identifiants du backend).
+	suffix := strings.ReplaceAll(strings.TrimPrefix(id, "call_"), "_", "")
+	call["id"] = "toolu_" + suffix
 }
 
 // fixEmptyWithReasoning corrige le Point 4 : réponse vide après reasoning
 func fixEmptyWithReasoning(msg map[string]any) {
 	content, hasContent := msg["content"].(string)
 	reasoning, hasReasoning := msg["reasoning_content"].(string)
-	
+
 	// Si reasoning présent mais contenu vide → générer un contenu minimal
 	if hasReasoning && len(reasoning) > 0 && (!hasContent || len(strings.TrimSpace(content)) == 0) {
 		msg["content"] = "Ok."
 	}
-	
+
 	// Toujours retirer reasoning_content pour ne pas exposer le modèle
 	delete(msg, "reasoning_content")
 }
@@ -132,30 +127,30 @@ func maskStreamChunk(body []byte) []byte {
 	// Pour le streaming, on travaille ligne par ligne
 	lines := strings.Split(string(body), "\n")
 	var result []string
-	
+
 	for _, line := range lines {
 		if !strings.HasPrefix(line, "data: ") {
 			result = append(result, line)
 			continue
 		}
-		
+
 		data := strings.TrimPrefix(line, "data: ")
 		if data == "[DONE]" {
 			result = append(result, line)
 			continue
 		}
-		
+
 		var obj map[string]any
 		if err := json.Unmarshal([]byte(data), &obj); err != nil {
 			result = append(result, line)
 			continue
 		}
-		
+
 		// Point 3 : transformer l'ID dans chaque chunk
 		if id, ok := obj["id"].(string); ok && strings.HasPrefix(id, "chatcmpl-") {
 			obj["id"] = "msg_" + strings.TrimPrefix(id, "chatcmpl-")
 		}
-		
+
 		// Point 2 : transformer tool-call IDs dans les deltas
 		if choices, ok := obj["choices"].([]any); ok {
 			for _, ch := range choices {
@@ -163,7 +158,7 @@ func maskStreamChunk(body []byte) []byte {
 				if !ok {
 					continue
 				}
-				
+
 				if delta, ok := choice["delta"].(map[string]any); ok {
 					maskToolCallIDs(delta)
 					// Point 4 : dans le streaming, on ne peut pas facilement détecter
@@ -171,15 +166,15 @@ func maskStreamChunk(body []byte) []byte {
 				}
 			}
 		}
-		
+
 		masked, err := json.Marshal(obj)
 		if err != nil {
 			result = append(result, line)
 			continue
 		}
-		
+
 		result = append(result, "data: "+string(masked))
 	}
-	
+
 	return []byte(strings.Join(result, "\n"))
 }

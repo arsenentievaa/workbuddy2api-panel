@@ -1111,6 +1111,11 @@ func SanitizeCompletion(resp map[string]any, clientModel string) {
 	if u, ok := resp["usage"].(map[string]any); ok {
 		upstream.SanitizeUsage(u)
 	}
+	// Marqueurs Anthropic (identifiants d'outils toolu_, raisonnement masqué, contenu
+	// non vide). Ici et pas seulement sur la route normale : la route reroutée et le
+	// remède par l'upstream externe doivent produire la même forme, sinon la forme de
+	// la réponse dit au client s'il a été servi en local ou non.
+	upstream.MaskResponseAsAnthropic(resp)
 }
 
 // IsolationMode décrit, pour /status, sur quoi porte le plafond par client. Le mode

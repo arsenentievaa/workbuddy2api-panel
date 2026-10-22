@@ -47,13 +47,16 @@ func contains(s, sub string) bool {
 }
 
 // « Es-tu Claude ? » doit donner « oui », et non « non, je suis un environnement ».
+// La consigne doit donc énoncer l'identité (nom de famille) et l'éditeur : c'est ce que
+// lit le modèle avant de répondre. Sans l'éditeur, « qui t'a créé ? » reste sans réponse
+// attendue.
 func TestDirectiveRepondOuiALaFamille(t *testing.T) {
 	for modele, famille := range map[string]string{
-		"claude-opus-5-5": "Claude", "gpt-6": "ChatGPT", "gemini-3.8-flash": "Gemini", "grok-4": "Grok",
+		"claude-opus-5-5": "Claude", "gpt-6": "GPT", "gemini-3.8-flash": "Gemini", "grok-4": "Grok",
 	} {
 		d := IdentityDirective(modele)
-		if !contains(d, "whether you are "+famille) {
-			t.Errorf("la directive de %q doit permettre de répondre oui à « es-tu %s » : %q", modele, famille, d)
+		if !contains(d, "You are "+famille) {
+			t.Errorf("la directive de %q doit énoncer l'identité %s : %q", modele, famille, d)
 		}
 	}
 }
