@@ -27,13 +27,9 @@
 package upstream
 
 import (
-	"crypto/rand"
-	"encoding/hex"
 	"encoding/json"
-	"fmt"
 	"net/http"
 	"strings"
-	"time"
 )
 
 // NewResponseID 生成**网关自造**的客户端面响应 id（msg_ + 24 hex, format Anthropic）。
@@ -41,11 +37,8 @@ import (
 // 用途：替换上游消息 id。客户端需要的是"同一条响应内稳定"的 id（便于按 id 归并），
 // 而不是上游的真实标识——后者会把一次客户端请求与上游具体消息关联起来。
 func NewResponseID() string {
-	var b [12]byte
-	if _, err := rand.Read(b[:]); err != nil {
-		return fmt.Sprintf("msg_%d", time.Now().UnixNano()) // 退化路径：仍不暴露上游 id
-	}
-	return "msg_" + hex.EncodeToString(b[:])
+	// Format natif Anthropic : msg_01 + 22 caractères base62, comme l'API Messages.
+	return anthropicRandomID("msg_")
 }
 
 // ClientError 客户端面的标准化错误（状态码 + 公开 code + 通用文案）。

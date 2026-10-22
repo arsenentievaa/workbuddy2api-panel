@@ -17,6 +17,9 @@ import (
 // 用哨兵错误替代裸 fmt.Errorf：StreamHint 的调用方（handler 流式路径）需要区分
 // 「上游空流」与「客户端断连写失败」——空流是上游缺陷，应记 502 观测；写失败是
 // 客户端已走，日志口径不同。Aggregate 与 StreamHint 共用同一哨兵（errors.Is 判定）。
+// fallbackResponseID : id de repli quand l'upstream n'en fournit aucun (forme native).
+const fallbackResponseID = "msg_01Xk9Zq2mTv7RpLdWn4Yb3Hc"
+
 var errEmptyStream = errors.New("upstream stream contained no valid data events")
 
 // IsEmptyStreamError 报告错误是否为「上游空流」（无有效 SSE 帧）——供 handler
@@ -414,7 +417,9 @@ func normalizeFrameSafe(obj map[string]any, clientModel string, sanitizeIDs bool
 		out["object"] = "chat.completion.chunk"
 	}
 	if _, ok := out["id"]; !ok {
-		out["id"] = "msg_01wb2api"
+		// Repli quand l'upstream n'a jamais fourni d'id : forme native Anthropic, stable
+		// sur toute la durée du flux (les trames doivent partager le même id).
+		out["id"] = fallbackResponseID
 	}
 	if chs, ok := obj["choices"].([]any); ok {
 		nchs := make([]any, 0, len(chs))
@@ -452,11 +457,10 @@ func normalizeFrameSafe(obj map[string]any, clientModel string, sanitizeIDs bool
 							for k, v := range tcm {
 								newTc[k] = v
 							}
-							// Transformer l'ID si présent
+							// Identifiant d'outil au format natif, stable pour un même
+							// identifiant du backend (même valeur -> même toolu_).
 							if id, ok := newTc["id"].(string); ok && strings.HasPrefix(id, "call_") {
-								suffix := strings.TrimPrefix(id, "call_")
-								suffix = strings.ReplaceAll(suffix, "_", "")
-								newTc["id"] = "toolu_" + suffix
+								newTc["id"] = anthropicIDFromSeed("toolu_", id)
 							}
 							maskedTcs[i] = newTc
 						} else {

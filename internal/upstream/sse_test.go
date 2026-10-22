@@ -416,17 +416,17 @@ func TestNormalizeFrame(t *testing.T) {
 			map[string]any{"choices": []any{
 				map[string]any{"index": 0, "delta": map[string]any{"tool_calls": []any{map[string]any{"id": "c1", "type": "function"}}}},
 			}},
-			`{"choices":[{"delta":{"tool_calls":[{"id":"c1","type":"function"}]},"finish_reason":null,"index":0}],"id":"msg_01wb2api","object":"chat.completion.chunk","usage":null}`},
+			`{"choices":[{"delta":{"tool_calls":[{"id":"c1","type":"function"}]},"finish_reason":null,"index":0}],"id":"msg_01Xk9Zq2mTv7RpLdWn4Yb3Hc","object":"chat.completion.chunk","usage":null}`},
 		{"empty tool_calls list dropped",
 			map[string]any{"choices": []any{
 				map[string]any{"index": 0, "delta": map[string]any{"tool_calls": []any{}, "content": "hi"}},
 			}},
-			`{"choices":[{"delta":{"content":"hi"},"finish_reason":null,"index":0}],"id":"msg_01wb2api","object":"chat.completion.chunk","usage":null}`},
+			`{"choices":[{"delta":{"content":"hi"},"finish_reason":null,"index":0}],"id":"msg_01Xk9Zq2mTv7RpLdWn4Yb3Hc","object":"chat.completion.chunk","usage":null}`},
 		{"empty placeholder function_call dropped",
 			map[string]any{"choices": []any{
 				map[string]any{"index": 0, "delta": map[string]any{"function_call": map[string]any{"name": "", "arguments": ""}}},
 			}},
-			`{"choices":[{"delta":{},"finish_reason":null,"index":0}],"id":"msg_01wb2api","object":"chat.completion.chunk","usage":null}`},
+			`{"choices":[{"delta":{},"finish_reason":null,"index":0}],"id":"msg_01Xk9Zq2mTv7RpLdWn4Yb3Hc","object":"chat.completion.chunk","usage":null}`},
 		{"top-level unknown fields dropped, usage null when absent",
 			map[string]any{"id": "x", "object": "chat.completion.chunk", "created": 1, "junk": "noise", "choices": []any{
 				map[string]any{"index": 0, "delta": map[string]any{}, "finish_reason": "stop"},
@@ -536,7 +536,7 @@ func TestStreamFirstIdPassthrough(t *testing.T) {
 	}
 }
 
-// TestStreamNoIdFallsBackToSentinel 全流无任何真实 id → 兜底 msg_01wb2api
+// TestStreamNoIdFallsBackToSentinel 全流无任何真实 id → 兜底 fallbackResponseID
 // （整流无 id 时的既有哨兵，帧与帧之间仍一惯性存在）。
 func TestStreamNoIdFallsBackToSentinel(t *testing.T) {
 	raw := "data: {\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hi\"}}]}\n\n" +
@@ -548,8 +548,8 @@ func TestStreamNoIdFallsBackToSentinel(t *testing.T) {
 		t.Fatalf("frames=%d want 2", len(frames))
 	}
 	for i, fr := range frames {
-		if got := fr["id"]; got != "msg_01wb2api" {
-			t.Errorf("frame %d id=%v want sentinel msg_01wb2api (无真实 id)", i, got)
+		if got := fr["id"]; got != fallbackResponseID {
+			t.Errorf("frame %d id=%v want sentinel %s (无真实 id)", i, got, fallbackResponseID)
 		}
 	}
 }

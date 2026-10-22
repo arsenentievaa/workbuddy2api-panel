@@ -103,9 +103,9 @@ func maskOneToolCallID(call map[string]any) {
 	if !ok || !strings.HasPrefix(id, "call_") {
 		return
 	}
-	// Format Anthropic : toolu_ + suffixe sans souligné (marque des identifiants du backend).
-	suffix := strings.ReplaceAll(strings.TrimPrefix(id, "call_"), "_", "")
-	call["id"] = "toolu_" + suffix
+	// Format natif, dérivé de l'identifiant du backend : stable (un même appel d'outil
+	// garde le même identifiant entre le flux et la réponse complète) sans l'exposer.
+	call["id"] = anthropicIDFromSeed("toolu_", id)
 }
 
 // fixEmptyWithReasoning corrige le Point 4 : réponse vide après reasoning

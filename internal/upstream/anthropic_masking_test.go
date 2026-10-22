@@ -2,6 +2,7 @@ package upstream
 
 import (
 	"encoding/json"
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -125,8 +126,10 @@ func TestMaskResponseAsAnthropic_AggregateShape(t *testing.T) {
 	if !ok || len(calls) != 1 {
 		t.Fatalf("tool_calls attendu 1 dans la forme Aggregate, obtenu %#v", msg["tool_calls"])
 	}
-	if id := calls[0]["id"]; id != "toolu_00wFIQ8IB79qJ807Ufcuwf2830" {
-		t.Fatalf("Point 2 non corrigé sur la forme Aggregate : id=%v", id)
+	// Identifiant natif et stable : même valeur backend -> même toolu_01..., 22 caractères.
+	want := anthropicIDFromSeed("toolu_", "call_00_wFIQ8IB79qJ807Ufcuwf2830")
+	if id := calls[0]["id"]; id != want {
+		t.Fatalf("Point 2 non corrigé sur la forme Aggregate : id=%v (attendu %s)", id, want)
 	}
 }
 
@@ -178,12 +181,20 @@ func TestMaskAsAnthropic_StreamFrames(t *testing.T) {
 	if strings.Contains(out, "call_00_ABC_def") {
 		t.Fatalf("Point 2 (streaming) non corrigé :\n%s", out)
 	}
-	if !strings.Contains(out, "toolu_00ABCdef") {
+	if !strings.Contains(out, "toolu_01") {
 		t.Fatalf("Point 2 (streaming) : identifiant d'outil non converti :\n%s", out)
 	}
-	// Le suffixe ne doit plus contenir de souligné : c'est la marque des identifiants du backend.
-	if strings.Contains(out, "toolu_00_") || strings.Contains(out, "toolu_ABC_def") {
-		t.Fatalf("Point 2 (streaming) : soulignés internes conservés :\n%s", out)
+	// Forme native : toolu_01 + 22 caractères alphanumériques, sans souligné interne
+	// (c'est la marque des identifiants du backend).
+	forma := regexp.MustCompile(`toolu_[A-Za-z0-9_]+`)
+	trouves := forma.FindAllString(out, -1)
+	if len(trouves) == 0 {
+		t.Fatalf("Point 2 (streaming) : aucun identifiant d'outil dans le flux :\n%s", out)
+	}
+	for _, id := range trouves {
+		if !regexp.MustCompile(`^toolu_01[A-Za-z0-9]{22}$`).MatchString(id) {
+			t.Fatalf("Point 2 (streaming) : forme d'identifiant inattendue %q :\n%s", id, out)
+		}
 	}
 	if !strings.Contains(out, "[DONE]") {
 		t.Fatal("la trame de fin doit être conservée")
