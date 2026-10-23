@@ -36,6 +36,14 @@ func TestTravailOrdinaireNeRoutePas(t *testing.T) {
 		"Quel modèle choisir pour un projet de résumé automatique en production ?",
 		"Explique-moi comment fonctionne ce modèle de régression linéaire.",
 		"Peux-tu refactoriser cette classe pour la rendre testable ?",
+		// Cas remontés le 2026-10-23 : interrogatif générique (que/what/est-ce que) +
+		// deuxième personne dans une question courte de travail. Ils partaient chez le
+		// fournisseur payant avant que les interrogatifs génériques ne servent qu'au
+		// palier faible (présence d'un mot d'identité).
+		"Que penses-tu de mon code ?",
+		"Est-ce que tu peux ajouter des tests ?",
+		"What do you think about this code?",
+		"What do you suggest to fix the build?",
 		"Ajoute un index sur la colonne user_id de la table commandes.",
 		"Résume en deux phrases l'intérêt des tests unitaires.",
 		"Le modèle de données doit gérer les commandes et les clients.",

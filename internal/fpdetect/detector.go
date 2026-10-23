@@ -15,7 +15,10 @@ import (
 // Noms des signaux. Référencés dans la configuration (poids, signaux forts) : ce sont
 // des identifiants stables, ne pas les renommer sans migrer les configurations.
 const (
-	SigGlitchToken       = "glitch_token"
+	SigGlitchToken = "glitch_token"
+	// SigGlitchTokenAmbig : jeton piege ambigu (identifiant plausible dans du code).
+	// Observe, jamais decisif — voir GlitchTokensAmbigus.
+	SigGlitchTokenAmbig  = "glitch_token_ambigu"
 	SigModelQuestion     = "model_question"
 	SigCutoffExplicit    = "cutoff_explicit"
 	SigMassRepetition    = "mass_repetition"
@@ -46,12 +49,14 @@ const (
 // nettement en dessous. Les pénalités ne peuvent annuler un signal fort — c'est
 // volontaire, sinon un test PDF contenant un bloc de code ne serait jamais routé.
 var defaultWeights = map[string]float64{
-	SigGlitchToken:    5.0,
-	SigRandomNumbers:  5.0,
-	SigJuicePattern:   3.0,
-	SigOutputProbe:    3.0,
-	SigModelQuestion:  5.0,
-	SigCutoffExplicit: 5.0,
+	SigGlitchToken: 5.0,
+	// Jeton piège ambigu : observé, poids faible, JAMAIS décisif (hors liste d'authenticité).
+	SigGlitchTokenAmbig: 1.0,
+	SigRandomNumbers:    5.0,
+	SigJuicePattern:     3.0,
+	SigOutputProbe:      3.0,
+	SigModelQuestion:    5.0,
+	SigCutoffExplicit:   5.0,
 	// repetition_pattern reste FORT : il ne réagit qu'à une consigne chiffrée
 	// explicite (« répète le mot pomme 150 fois »), qu'on ne rencontre pas dans un
 	// usage normal.
@@ -417,6 +422,9 @@ type Detector struct {
 	// authenticity : signaux qui, seuls, envoient la requête chez le fournisseur
 	// externe. Voir defaultAuthenticity pour la règle et sa justification.
 	authenticity map[string]bool
+	// glitchAmbigu : jetons pieges qui peuvent apparaitre dans du code (voir
+	// GlitchTokensAmbigus). Comptes a part : observes, jamais decisifs.
+	glitchAmbigu map[string]bool
 	state        *State
 }
 
@@ -465,11 +473,16 @@ func New(cfg Config) *Detector {
 	// Authenticity : liste FIXE (voir defaultAuthenticity). Elle n'est pas configurable
 	// à dessein : c'est la règle produit « le vrai Claude ne sert qu'aux tests
 	// d'authenticité », pas un réglage d'exploitation qui pourrait dériver.
+	ambigus := make(map[string]bool, len(GlitchTokensAmbigus))
+	for tok := range GlitchTokensAmbigus {
+		ambigus[strings.ToLower(tok)] = true
+	}
 	authenticity := make(map[string]bool, len(defaultAuthenticity))
 	for _, s := range defaultAuthenticity {
 		authenticity[s] = true
 	}
-	return &Detector{cfg: cfg, strong: strong, corroboration: corroboration, authenticity: authenticity, state: cfg.State}
+	return &Detector{cfg: cfg, strong: strong, corroboration: corroboration, authenticity: authenticity,
+		glitchAmbigu: ambigus, state: cfg.State}
 }
 
 func (d *Detector) weight(name string) float64 {
@@ -510,8 +523,13 @@ func (d *Detector) AnalyzeAt(body []byte, clientKey string, now time.Time) Resul
 	}
 
 	// 1) Jetons pièges. Le détail ne recopie jamais le jeton (charge utile).
-	if n, series := d.matchGlitch(fullLower); n > 0 {
-		add(SigGlitchToken, fmt.Sprintf("%d jeton(s) piège%s", n, series))
+	//    Deux familles : les jetons sans ambiguïté (phrases CJK, chaînes impossible dans
+	//    du code) décident du routage ; les identifiants plausibles dans du code
+	//    (jsii, guiActive, widgetToFullName…) ne sont qu'observés.
+	if forts, ambigus, series := d.matchGlitch(fullLower); forts > 0 {
+		add(SigGlitchToken, fmt.Sprintf("%d jeton(s) piège%s", forts, series))
+	} else if ambigus > 0 {
+		add(SigGlitchTokenAmbig, fmt.Sprintf("%d identifiant(s) proche(s) d'un jeton piège", ambigus))
 	}
 
 	// 2) Question d'identité du modèle (multilingue), en deux niveaux.
@@ -807,32 +825,72 @@ func hitContains(lower string, phrases []string) bool {
 	return false
 }
 
-func (d *Detector) matchGlitch(lower string) (int, string) {
-	n := 0
-	series := map[string]bool{}
+func (d *Detector) matchGlitch(lower string) (forts int, ambigus int, series string) {
+	vus := map[string]bool{}
 	for _, tok := range d.cfg.GlitchTokens {
 		if tok == "" {
 			continue
 		}
-		if strings.Contains(lower, strings.ToLower(tok)) {
-			n++
-			if s, ok := d.cfg.GlitchMeta[tok]; ok && s != "" {
-				series[s] = true
-			}
+		if !containsGlitchToken(lower, strings.ToLower(tok)) {
+			continue
+		}
+		if d.glitchAmbigu[strings.ToLower(tok)] {
+			ambigus++
+			continue
+		}
+		forts++
+		if s, ok := d.cfg.GlitchMeta[tok]; ok && s != "" {
+			vus[s] = true
 		}
 	}
-	if n == 0 {
-		return 0, ""
+	if len(vus) == 0 {
+		return forts, ambigus, ""
 	}
-	if len(series) == 0 {
-		return n, ""
-	}
-	keys := make([]string, 0, len(series))
-	for s := range series {
+	keys := make([]string, 0, len(vus))
+	for s := range vus {
 		keys = append(keys, s)
 	}
 	sort.Strings(keys)
-	return n, " (" + strings.Join(keys, ",") + ")"
+	return forts, ambigus, " (" + strings.Join(keys, ",") + ")"
+}
+
+// containsGlitchToken : recherche d'un jeton piège avec frontières pour les identifiants
+// ASCII. Un identifiant ne doit pas être reconnu à l'intérieur d'un autre (sinon « jsii »
+// matcherait « jsii-spec » ou n'importe quel mot le contenant). Les jetons non ASCII
+// (phrases CJK) restent cherchés en sous-chaîne : ce sont des groupes de mots.
+func containsGlitchToken(lower, tok string) bool {
+	if tok == "" {
+		return false
+	}
+	asciiMot := true
+	for _, r := range tok {
+		if r > 127 || !(r == '_' || r == '-' || (r >= '0' && r <= '9') || (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z')) {
+			asciiMot = false
+			break
+		}
+	}
+	if !asciiMot {
+		return strings.Contains(lower, tok)
+	}
+	debut := 0
+	for {
+		i := strings.Index(lower[debut:], tok)
+		if i < 0 {
+			return false
+		}
+		pos := debut + i
+		avantOK := pos == 0 || !estCaractereMot(lower[pos-1])
+		fin := pos + len(tok)
+		apresOK := fin == len(lower) || !estCaractereMot(lower[fin])
+		if avantOK && apresOK {
+			return true
+		}
+		debut = pos + 1
+	}
+}
+
+func estCaractereMot(b byte) bool {
+	return b == '_' || (b >= '0' && b <= '9') || (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z')
 }
 
 // --- extraction -----------------------------------------------------------------

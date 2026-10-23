@@ -93,6 +93,34 @@ var GlitchTokensFromLiterature = []GlitchToken{
 	{"chuyu-gengduo-xinxi", "Qwen", "", "littérature"},
 }
 
+// GlitchTokensAmbigus : jetons pièges qui peuvent apparaître dans du code ou des
+// dépendances ordinaires. Constat de production du 2026-10-23 : une requête de build
+// AWS CDK (« npm i jsii », « widgetToFullName ») déclenchait glitch_token et partait
+// entière — souvent 100 000 jetons de contexte — chez le fournisseur payant.
+//
+// Ces jetons restent OBSERVÉS (signal glitch_token_ambigu, visible dans /status) mais ne
+// décident plus d'un routage : ils ne sont pas des preuves d'authentification.
+var GlitchTokensAmbigus = map[string]bool{
+	"jsii":             true,
+	"jiaqi":            true,
+	"theoretisch":      true,
+	"guiActive":        true,
+	"guiActiveUn":      true,
+	"unfocusedRange":   true,
+	"ScaledRich":       true,
+	"widgetToFullName": true,
+	"intFragmentation": true,
+	"SRPInterfaceItem": true,
+	"opencamerastudio": true,
+	"StarSrvGroupBody": true,
+	"externalToEVA":    true,
+	"ForgeModLoader":   true,
+	"PsyNetMessage":    true,
+	"wcsstore":         true,
+	"StreamerBot":      true,
+	"Dragonbound":      true,
+}
+
 // DefaultGlitchTokens concatène les deux sources ci-dessus.
 func DefaultGlitchTokens() []GlitchToken {
 	out := make([]GlitchToken, 0, len(GlitchTokensFromPackage)+len(GlitchTokensFromLiterature))

@@ -222,21 +222,55 @@ var possessiveIdentityForms = []string{
 
 // identityInterrogatives : mots interrogatifs d'identité. Ils suffisent avec la
 // 2e personne : « tu es qui ? » ne contient aucun mot « modèle ».
+// identityInterrogatives : interrogatifs d'IDENTITÉ uniquement.
+//
+// Constat de production du 2026-10-23 : la liste contenait aussi les interrogatifs
+// génériques (« what », « que », « quoi », « was », « cosa », « что »…). Avec la seule
+// condition « 2e personne + interrogatif + question courte », des demandes de travail
+// ordinaires partaient chez le fournisseur payant :
+//
+//	« Que penses-tu de mon code ? »        → model_question
+//	« Est-ce que tu peux ajouter des tests ? » → model_question
+//	« What do you think about this code? »  → model_question
+//
+// Seuls les interrogatifs de PERSONNE (« qui ») désignent l'identité sans ambiguïté. Les
+// tournures en « quoi / what » qui visent vraiment l'assistant contiennent presque toutes
+// un mot d'identité (modèle, IA, version, éditeur…) : c'est la branche « mot d'identité »
+// ci-dessous qui les attrape.
 var identityInterrogatives = []string{
-	"who", "whom", "whose", "what", "which",
-	"qui", "que", "quoi", "quel", "quelle", "quels", "quelles",
-	"quien", "quién", "quienes", "qué", "cual", "cuál", "quem", "qual", "quais",
-	"wer", "was", "welcher", "welche", "welches", "welchem", "welchen", "wie", "wat", "welk", "welke",
-	"chi", "che", "cosa", "quale", "cine",
-	"kto", "kdo", "co", "jaki", "jaka", "jakie", "który", "ktora", "która",
-	"кто", "что", "какой", "какая", "какие", "хто", "що", "який", "яка",
-	"kim", "kimsin", "kimsiniz", "nesin", "hangi", "milyen", "ki", "mikä", "kuka",
-	"ما", "ماذا", "من", "اي", "أي", "کی", "چه", "מי", "מה",
-	"कौन", "क्या", "कौनसा", "कौन-सा", "کون", "کیا", "কে", "কি",
-	"谁", "誰", "什么", "什麼", "哪", "哪位", "哪個", "哪个",
-	"だれ", "何", "なに", "どの", "どれ", "누구", "무엇", "뭐", "어떤", "어느",
-	"ai", "gì", "gi", "nào", "nao", "siapa", "apa", "mana", "ใคร", "อะไร",
-	"ποιος", "ποια", "τι", "vem", "vad", "hvem", "hvad", "hvilken", "nani",
+	"who", "whom", "whose",
+	"qui",
+	"quien", "quién", "quienes", "quem",
+	"wer", "wie",
+	"chi",
+	"kto", "kdo",
+	"кто", "хто",
+	"kim", "kimsin", "kimsiniz",
+	"من", "کی", "מי",
+	"कौन", "کون", "কে",
+	"谁", "誰",
+	"だれ", "누구",
+	"ai", "siapa",
+	"ποιος", "ποια",
+	"vem", "vad", "hvem",
+	"kuka", "ki",
+	"ใคร", "nani", "cine",
+}
+
+// genericInterrogatives : interrogatifs génériques (« quoi / what / apa / gì »). Ils ne
+// suffisent JAMAIS à qualifier une question d'identité : ils ne comptent que pour
+// autoriser le palier faible, c'est-à-dire quand la phrase parle déjà de « modèle » à la
+// deuxième personne (« Anda model apa? », « Bạn là model gì? »). Sans cette liste, ces
+// tournures n'étaient plus détectées ; avec elle seule, « Que penses-tu de mon code ? »
+// partait chez le fournisseur payant.
+var genericInterrogatives = []string{
+	"what", "which", "que", "quoi", "quel", "quelle", "quels", "quelles",
+	"qué", "cual", "cuál", "what", "was", "welcher", "welche", "welches", "wie",
+	"che", "cosa", "quale", "co", "jaki", "jaka", "jakie", "что", "какой", "какая",
+	"що", "який", "яка", "hangi", "milyen", "mikä", "ma", "mاذا", "ماذا", "اي", "أي",
+	"چه", "क्या", "कौनसा", "کیا", "কি", "什么", "什麼", "哪", "何", "なに",
+	"どの", "どれ", "무엇", "뭐", "어떤", "어느", "gì", "gi", "nào", "nao",
+	"apa", "mana", "อะไร", "τι", "hvad", "hvilken",
 }
 
 // foldAccents : retire les diacritiques latins courants, pour que « modèle » rencontre
@@ -404,13 +438,15 @@ func structuralIdentityQuestion(user string) (bool, string) {
 	tokens = strings.Fields(glued)
 
 	// Index de chaque famille, puis décision par palier.
-	var selfs, interrs, weaks, strongs []int
+	var selfs, interrs, generics, weaks, strongs []int
 	for i, t := range tokens {
 		switch {
 		case isSelfRef(t):
 			selfs = append(selfs, i)
 		case containsForm(identityInterrogatives, t):
 			interrs = append(interrs, i)
+		case containsForm(genericInterrogatives, t):
+			generics = append(generics, i)
 		default:
 			// « ton modèle » porte déjà la 2e personne : le mot est des deux côtés.
 			if containsForm(possessiveIdentityForms, t) {
@@ -436,7 +472,7 @@ func structuralIdentityQuestion(user string) (bool, string) {
 	// (« ¿qué modelo eres? », « ce model ești? »). Sans cette condition,
 	// « Kannst du dieses Modell benutzen? » (peux-tu utiliser ce modèle) partait chez le
 	// vrai Claude.
-	weakOK := len(interrs) > 0
+	weakOK := len(interrs) > 0 || len(generics) > 0
 	if !weakOK {
 		for _, sr := range selfs {
 			if isSelfVerb(tokens[sr]) {

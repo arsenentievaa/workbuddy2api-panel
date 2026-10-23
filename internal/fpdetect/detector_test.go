@@ -140,6 +140,14 @@ func TestMotifDeRepetitionObserveMaisNeRoutePas(t *testing.T) {
 func TestJetonsPiegesDuPaquetglitchLens(t *testing.T) {
 	for _, g := range GlitchTokensFromPackage {
 		t.Run(g.ModelSeries, func(t *testing.T) {
+			if GlitchTokensAmbigus[g.Token] {
+				// Identifiant plausible dans du code : observé, jamais décisif.
+				r := New(DefaultConfig()).Analyze(body(t, "que penses-tu de "+g.Token+" ?", nil), "c")
+				if r.Route || !r.has(SigGlitchTokenAmbig) {
+					t.Fatalf("%s doit être observé sans router (%v)", g.Token, r.SignalNames())
+				}
+				return
+			}
 			r := mustRoute(t, body(t, "que penses-tu de "+g.Token+" ?", nil))
 			if !r.has(SigGlitchToken) {
 				t.Fatalf("glitch_token attendu pour %s", g.ModelSeries)
@@ -148,8 +156,34 @@ func TestJetonsPiegesDuPaquetglitchLens(t *testing.T) {
 	}
 }
 
+// Jeton piège ambigu : observé, mais jamais décisif. Un identifiant présent dans du code
+// ordinaire (jsii, guiActive…) ne doit pas envoyer la requête chez le fournisseur payant.
+func TestJetonPiegeAmbiguNeRoutePas(t *testing.T) {
+	for tok := range GlitchTokensAmbigus {
+		r := New(DefaultConfig()).Analyze(body(t, "corrige l'erreur de build avec "+tok+" dans le projet", nil), "c")
+		if r.Route {
+			t.Fatalf("%s ne doit pas router (%v)", tok, r.SignalNames())
+		}
+		if !r.has(SigGlitchTokenAmbig) {
+			t.Fatalf("%s doit rester observé (%v)", tok, r.SignalNames())
+		}
+	}
+}
+
+// Une vraie requête de développement citant un paquet courant ne part pas chez l'externe.
+func TestRequeteDeDeveloppementAvecIdentifiantProcheJetonPiege(t *testing.T) {
+	r := New(DefaultConfig()).Analyze(body(t,
+		"Corrige ce build AWS CDK: npm i jsii && npm run build. L'erreur vient de widgetToFullName.", nil), "c")
+	if r.Route {
+		t.Fatalf("requête de développement routée (%v)", r.SignalNames())
+	}
+}
+
 func TestJetonsPiegesDeLaLitterature(t *testing.T) {
 	for _, g := range GlitchTokensFromLiterature {
+		if GlitchTokensAmbigus[g.Token] {
+			continue // ambigu : observé seulement, couvert par TestJetonPiegeAmbiguNeRoutePas
+		}
 		t.Run(g.Token, func(t *testing.T) {
 			mustRoute(t, body(t, "explique "+g.Token+" simplement", nil))
 		})
