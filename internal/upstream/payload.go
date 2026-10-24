@@ -49,6 +49,9 @@ func PrepareBodyOptWithEffortsAndDefault(src []byte, sanitize bool, efforts map[
 	}
 	normalizeToolChoice(obj)
 	normalizeRoles(obj)
+	// L'amont ignore les messages « system » : on les transporte dans le premier message
+	// utilisateur (voir payload_system.go).
+	mergeSystemIntoUser(obj)
 	normalizeImageURL(obj)
 	// tool 配对两步（见 tool_pairing.go）：先重排再清理。所有模型一律执行（独立于
 	// deepseek-only 的 sanitize 开关）。这是「让请求通过」的安全网——不完整配对的
