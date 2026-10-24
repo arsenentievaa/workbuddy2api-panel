@@ -209,6 +209,29 @@ func LeaksInternal(text string, allow ...string) bool {
 // 采用**白名单**而非黑名单：上游新增字段时默认被剥离，不必每次追着补名单。
 var clientUsageKeys = []string{"prompt_tokens", "completion_tokens", "total_tokens"}
 
+// cacheHitTokens : jetons servis depuis le cache de l'upstream, quel que soit le nom que
+// l'upstream leur donne. Renvoyer ce chiffre est INDISPENSABLE au client : c'est lui qui
+// déclenche le tarif réduit de lecture de cache. Le 2026-10-24, un client a payé 39,50 $
+// pour 22 requêtes de ~517 000 jetons facturés plein tarif alors que l'upstream servait
+// l'essentiel depuis son cache : le champ était supprimé ici, donc le rabais n'existait
+// pas côté facturation.
+func cacheHitTokens(usage map[string]any) (int, bool) {
+	if usage == nil {
+		return 0, false
+	}
+	for _, cle := range []string{"prompt_cache_hit_tokens", "cached_tokens", "cache_read_input_tokens"} {
+		if v, ok := num64(usage[cle]); ok && v > 0 {
+			return int(v), true
+		}
+	}
+	if details, ok := usage["prompt_tokens_details"].(map[string]any); ok {
+		if v, ok := num64(details["cached_tokens"]); ok && v > 0 {
+			return int(v), true
+		}
+	}
+	return 0, false
+}
+
 // SanitizeUsage 就地裁剪 usage，只保留 clientUsageKeys（返回同一 map 便于链式调用）。
 // nil 输入返回 nil。
 //
@@ -219,6 +242,9 @@ func SanitizeUsage(usage map[string]any) map[string]any {
 	if usage == nil {
 		return nil
 	}
+	// Le cache est releve AVANT la purge : il repart ensuite sous la forme standard
+	// prompt_tokens_details.cached_tokens (et non sous un nom propre a l'upstream).
+	cache, aDuCache := cacheHitTokens(usage)
 	for k := range usage {
 		keep := false
 		for _, allowed := range clientUsageKeys {
@@ -230,6 +256,16 @@ func SanitizeUsage(usage map[string]any) map[string]any {
 		if !keep {
 			delete(usage, k)
 		}
+	}
+	if aDuCache {
+		plafond := 0
+		if v, ok := num64(usage["prompt_tokens"]); ok {
+			plafond = int(v)
+		}
+		if plafond > 0 && cache > plafond {
+			cache = plafond
+		}
+		usage["prompt_tokens_details"] = map[string]any{"cached_tokens": cache}
 	}
 	return usage
 }
