@@ -1601,7 +1601,9 @@ func TestCustomModeFingerprintSanitizePreserved(t *testing.T) {
 	var systemCount int
 	for _, m := range msgs {
 		mm := m.(map[string]any)
-		if mm["role"] == "system" {
+		// Depuis le 2026-10-24, le prompt de la passerelle n'est plus un message « system »
+		// (l'amont ignore ce role) : il est transporte en tete du premier message utilisateur.
+		if mm["role"] == "system" || (mm["role"] == "user" && strings.HasPrefix(mm["content"].(string), customSys)) {
 			systemCount++
 			contenu, _ := mm["content"].(string)
 			// Le prompt de l'exploitant est bien la base, mais la consigne de langue le ferme

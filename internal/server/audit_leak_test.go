@@ -285,8 +285,8 @@ const sseUsageBackend = "data: {\"id\":\"up-1\",\"object\":\"chat.completion.chu
 // deepseekUsageFields 上游塞进 usage 的非规范字段（审计实测集合）。
 var deepseekUsageFields = []string{
 	"prompt_cache_hit_tokens", "prompt_cache_miss_tokens", "prompt_cache_write_tokens",
-	"cached_tokens", "cache_creation_input_tokens", "cache_read_input_tokens",
-	"completion_thinking_tokens", "credit", "prompt_tokens_details", "completion_tokens_details",
+	"cache_creation_input_tokens", "cache_read_input_tokens",
+	"completion_thinking_tokens", "credit", "completion_tokens_details",
 }
 
 func assertUsageClean(t *testing.T, label string, usage map[string]any) {
@@ -294,8 +294,19 @@ func assertUsageClean(t *testing.T, label string, usage map[string]any) {
 	if usage == nil {
 		t.Fatalf("%s: usage absent", label)
 	}
-	if len(usage) != 3 {
-		t.Errorf("%s: usage keys=%v want exactly prompt_tokens/completion_tokens/total_tokens", label, usage)
+	// prompt_tokens_details.cached_tokens est un champ STANDARD (OpenAI) : il est autorise,
+	// et c'est lui qui déclenche le tarif de cache réduit côté plateforme.
+	for k := range usage {
+		if k != "prompt_tokens" && k != "completion_tokens" && k != "total_tokens" && k != "prompt_tokens_details" {
+			t.Errorf("%s: usage field %q not allowed", label, k)
+		}
+	}
+	if details, ok := usage["prompt_tokens_details"].(map[string]any); ok {
+		for k := range details {
+			if k != "cached_tokens" {
+				t.Errorf("%s: prompt_tokens_details field %q not allowed", label, k)
+			}
+		}
 	}
 	for _, k := range []string{"prompt_tokens", "completion_tokens", "total_tokens"} {
 		if _, ok := usage[k]; !ok {
