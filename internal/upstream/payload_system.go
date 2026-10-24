@@ -1,9 +1,6 @@
 package upstream
 
-import (
-	"log"
-	"strings"
-)
+import "strings"
 
 // L'amont ne tient aucun compte des messages de role « system » : verifie le
 // 2026-10-24, une consigne systeme (« reponds uniquement par PINEAPPLE ») n'est ni
@@ -39,7 +36,6 @@ func mergeSystemIntoUser(obj map[string]any) {
 		return
 	}
 	prefixe := strings.Join(systemes, "\n\n")
-	log.Printf("[payload] systeme fusionne dans le premier message utilisateur (%d caracteres)", len(prefixe))
 	for i, m := range restants {
 		msg, ok := m.(map[string]any)
 		if !ok {
