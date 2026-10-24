@@ -46,12 +46,14 @@ func TestNormalizeRoles(t *testing.T) {
 
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			// 全程 sanitize=false：验证 role 归一与内容脱敏开关无关（D4）。
-			out := PrepareBodyOptWithEfforts([]byte(c.body), false, nil)
+			// On teste normalizeRoles SEUL : depuis le 2026-10-24, la chaine complete
+			// fusionne ensuite les messages system dans le premier message utilisateur
+			// (l'amont ignore le role system), ce qui masquerait la normalisation.
 			var obj map[string]any
-			if err := json.Unmarshal(out, &obj); err != nil {
-				t.Fatalf("unmarshal: %v (out=%s)", err, out)
+			if err := json.Unmarshal([]byte(c.body), &obj); err != nil {
+				t.Fatalf("unmarshal: %v", err)
 			}
+			normalizeRoles(obj)
 
 			// 提取输出 messages 里的 role（非对象元素跳过，不 panic）。
 			var got []string

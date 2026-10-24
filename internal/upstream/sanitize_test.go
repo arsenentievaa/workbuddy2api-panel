@@ -324,17 +324,24 @@ func TestChatStreamWireBodyCodexInstructionsSanitized(t *testing.T) {
 	if err := json.Unmarshal(gotBody, &obj); err != nil {
 		t.Fatalf("wire body not json: %v", err)
 	}
-	sys, _ := obj["messages"].([]any)[0].(map[string]any)["content"].(string)
-	if strings.Contains(sys, codexInstructions) ||
-		strings.Contains(sys, "in the Codex CLI, a terminal-based coding assistant.") {
-		t.Errorf("wire body still contains codex fingerprint: %q", sys)
+	// Depuis le 2026-10-24, le message systeme est fusionne en tete du premier message
+	// utilisateur (l'amont ignore le role system) : on inspecte donc le contenu entier.
+	var fil string
+	for _, m := range obj["messages"].([]any) {
+		mm, _ := m.(map[string]any)
+		if c, ok := mm["content"].(string); ok {
+			fil += c + "\n"
+		}
 	}
-	if !strings.Contains(sys, "running in the Codex CLI tool, a terminal-based") {
-		t.Errorf("codex rewrite missing on wire: %q", sys)
+	if strings.Contains(fil, codexInstructions) ||
+		strings.Contains(fil, "in the Codex CLI, a terminal-based coding assistant.") {
+		t.Errorf("wire body still contains codex fingerprint: %q", fil)
 	}
-	user, _ := obj["messages"].([]any)[1].(map[string]any)["content"].(string)
-	if user != "say ok" {
-		t.Errorf("user message altered: %q", user)
+	if !strings.Contains(fil, "running in the Codex CLI tool, a terminal-based") {
+		t.Errorf("codex rewrite missing on wire: %q", fil)
+	}
+	if !strings.Contains(fil, "say ok") {
+		t.Errorf("user message altered: %q", fil)
 	}
 }
 
