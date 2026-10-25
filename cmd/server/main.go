@@ -354,9 +354,16 @@ func main() {
 			cfg.FPObserve.CorroborationSignals, cfg.FPObserve.CorroborationWeakMin,
 			cfg.FPRoute.MaxPerHourTotal,
 			time.Duration(cfg.FPRoute.LanguageLeakWindowSeconds)*time.Second)
-		// Budget DÉDIÉ au remède des fuites de langue : sans lui, un client qui a épuisé
-		// son quota de sondes ne peut plus faire remplacer une réponse chinoise.
-		fpCounters.SetLeakCaps(cfg.FPRoute.MaxLeakPerHourClient, cfg.FPRoute.MaxLeakPerHourTotal)
+		// Budget du remède aux fuites de langue ramene a ZERO : le fournisseur externe ne
+		// doit plus etre sollicite que pour une verification d'identite (regle de
+		// l'exploitant, 2026-10-25). Les rejeux sur le parc restent, eux, gratuits ; si
+		// aucun ne corrige la langue, le client recoit une erreur claire a relancer.
+		if cfg.FPRoute.MaxLeakPerHourClient > 0 || cfg.FPRoute.MaxLeakPerHourTotal > 0 {
+			log.Printf("[fp] remede aux fuites de langue : appels externes desactives (budget %d/%d ramene a 0)",
+				cfg.FPRoute.MaxLeakPerHourClient, cfg.FPRoute.MaxLeakPerHourTotal)
+		}
+		cfg.FPRoute.MaxLeakPerHourClient, cfg.FPRoute.MaxLeakPerHourTotal = 0, 0
+		fpCounters.SetLeakCaps(0, 0)
 		// Les langues déclarées sont journalisées : c'est la trace vérifiable de la
 		// couverture annoncée, et le panneau relit la valeur dans /status.
 		labels := make([]string, 0, len(cfg.FPObserve.Languages))

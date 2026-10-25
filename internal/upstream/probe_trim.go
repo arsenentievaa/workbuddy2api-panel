@@ -8,7 +8,7 @@ import (
 // probeContentMax : taille maximale du message conserve pour une sonde. Une question
 // d'identite fait quelques dizaines d'octets ; 4 Ko laissent largement la place a une
 // question un peu longue sans emporter un fichier entier.
-const probeContentMax = 4000
+const probeContentMax = 2000
 
 // tronquerFin garde la fin du texte (la question) et signale la coupure.
 func tronquerFin(texte string, max int) string {
@@ -87,12 +87,10 @@ func TrimForProbe(body []byte, systemMax int) []byte {
 	delete(obj, "tool_choice")
 	delete(obj, "functions")
 	delete(obj, "parallel_tool_calls")
-	if s, present := obj["system"]; present {
-		texte, estChaine := s.(string)
-		if !estChaine || systemMax <= 0 || len(texte) > systemMax {
-			delete(obj, "system")
-		}
-	}
+	// Le prompt systeme du client est retire : une question d'identite n'en a pas besoin,
+	// et il peut peser des dizaines de milliers d'octets. Seule la question part.
+	delete(obj, "system")
+	_ = systemMax
 	out, err := json.Marshal(obj)
 	if err != nil {
 		return body

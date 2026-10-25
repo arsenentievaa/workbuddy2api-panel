@@ -542,18 +542,25 @@ func (d *Detector) AnalyzeAt(body []byte, clientKey string, now time.Time) Resul
 	//    question commerciale légitime — « Which model is best for summarisation? ».
 	//    Elles ne comptent donc que sur une requête très brève (une sonde), sinon
 	//    elles enverraient du trafic client normal vers le modèle payant.
-	if strict, loose := firstIdentityHit(dernierLower); strict != "" {
-		// Le motif est journalise (jamais le texte du client) : sans lui, impossible de
-		// savoir QUELLE formulation a declenche une sonde facturee.
-		add(SigModelQuestion, "question explicite sur l'identité (motif « "+strict+" »)")
-	} else if loose != "" && len([]rune(dernier)) <= looseIdentityMaxRunes {
-		add(SigModelQuestion, "forme brève « quel modèle » (motif « "+loose+" »)")
-	} else if ok, why := structuralIdentityQuestion(dernier); ok {
-		// Règle structurelle, toutes langues : 2e personne + mot d'identité (ou
-		// interrogatif) dans une question courte. Elle rattrape les tournures que la
-		// liste de phrases ne connaît pas — c'est elle qui rend la détection tenable
-		// pour des développeurs du monde entier. Voir identity_structural.go.
-		add(SigModelQuestion, "question d'identité (structurelle) : "+why)
+	// GARDE-FOU DE FORME : seules les demandes qui RESSEMBLENT a une question
+	// d'identite autonome peuvent declencher une sonde. Un long message de travail, un
+	// extrait de code ou un fichier colle ne sont pas des questions d'identite, meme s'ils
+	// contiennent une phrase qui y ressemble. Sans cette garde, une session de code
+	// pouvait declencher des sondes facturees (constat du 2026-10-25).
+	if ressembleAQuestionDIdentite(dernier) {
+		if strict, loose := firstIdentityHit(dernierLower); strict != "" {
+			// Le motif est journalise (jamais le texte du client) : sans lui, impossible de
+			// savoir QUELLE formulation a declenche une sonde facturee.
+			add(SigModelQuestion, "question explicite sur l'identité (motif « "+strict+" »)")
+		} else if loose != "" && len([]rune(dernier)) <= looseIdentityMaxRunes {
+			add(SigModelQuestion, "forme brève « quel modèle » (motif « "+loose+" »)")
+		} else if ok, why := structuralIdentityQuestion(dernier); ok {
+			// Règle structurelle, toutes langues : 2e personne + mot d'identité (ou
+			// interrogatif) dans une question courte. Elle rattrape les tournures que la
+			// liste de phrases ne connaît pas — c'est elle qui rend la détection tenable
+			// pour des développeurs du monde entier. Voir identity_structural.go.
+			add(SigModelQuestion, "question d'identité (structurelle) : "+why)
+		}
 	}
 
 	// 3) Question explicite sur la date de coupure de connaissance.
@@ -1244,4 +1251,35 @@ func sigOutputProbeHelper(lower string) bool {
 		"respond only", "say only", "output only",
 	}
 	return hitContains(lower, phrases)
+}
+
+// identityProbeMaxRunes : longueur maximale d'un message pour qu'il puisse etre une
+// question d'identite. Une vraie sonde tient en une phrase courte ; au-dela, c'est du
+// travail, ou une question collee a un bloc de texte. Aligne sur identityMaxRunes.
+const identityProbeMaxRunes = 160
+
+// ressembleAQuestionDIdentite : le message est-il une question autonome, courte, sans
+// code ni fichier ? C'est la condition d'entree de TOUTE sonde facturee.
+func ressembleAQuestionDIdentite(message string) bool {
+	t := strings.TrimSpace(message)
+	if t == "" {
+		return false
+	}
+	runes := []rune(t)
+	if len(runes) > identityProbeMaxRunes {
+		return false
+	}
+	// Un bloc de code, un extrait de fonction ou un chemin de fichier ne sont pas des
+	// questions d'identite.
+	if strings.Contains(t, "```") {
+		return false
+	}
+	if strings.Contains(t, "{") && strings.Contains(t, "}") {
+		return false
+	}
+	// Un message de plus de six lignes est un message de travail.
+	if strings.Count(t, "\n") > 6 {
+		return false
+	}
+	return true
 }

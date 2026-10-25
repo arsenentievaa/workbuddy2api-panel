@@ -30,8 +30,8 @@ func TestTrimForProbeGardeLeDernierMessage(t *testing.T) {
 	if _, present := obj["tools"]; present {
 		t.Fatalf("les outils doivent etre retires")
 	}
-	if obj["system"] != "Tu es un assistant." {
-		t.Fatalf("le prompt systeme court doit etre conserve: %v", obj["system"])
+	if _, present := obj["system"]; present {
+		t.Fatalf("le prompt systeme doit etre retire : seule la question part")
 	}
 	if obj["max_tokens"] != float64(100) || obj["model"] != "claude-opus-5-5" {
 		t.Fatalf("reglages de generation perdus: %v", obj)

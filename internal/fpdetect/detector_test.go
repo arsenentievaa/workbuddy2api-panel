@@ -115,10 +115,12 @@ func TestRepetitionMassiveEstConditionnelle(t *testing.T) {
 			if !r.has(SigMassRepetition) {
 				t.Fatalf("mass_repetition attendu : %s", r.Explain())
 			}
-			// Corroborée par une méthode indépendante : elle route.
-			r2 := mustRoute(t, body(t, text+" Quel modèle es-tu ?", nil))
-			if !r2.has(SigMassRepetition) || r2.Strong != SigModelQuestion {
-				t.Fatalf("corroboration attendue : %s", r2.Explain())
+			// GARDE-FOU DE FORME (2026-10-25) : une question d'identité COLLÉE à un gros
+			// bloc de texte n'est plus une sonde autonome — elle ne route pas. C'est ce
+			// qui empêchait les sessions de code de déclencher des appels facturés.
+			r2 := mustNotRoute(t, body(t, text+" Quel modèle es-tu ?", nil))
+			if !r2.has(SigMassRepetition) {
+				t.Fatalf("mass_repetition doit rester observe : %s", r2.Explain())
 			}
 		})
 	}
@@ -321,7 +323,8 @@ func TestLignesIdentiquesEstConditionnel(t *testing.T) {
 	if r.has(SigRepetitionPattern) {
 		t.Fatalf("la consigne chiffrée n'est pas en cause ici : %s", r.Explain())
 	}
-	mustRoute(t, body(t, strings.Repeat("test line\n", 30)+" Quel modèle es-tu ?", nil))
+	// Idem : un bloc de 30 lignes suivi d'une question d'identité n'est pas une sonde.
+	mustNotRoute(t, body(t, strings.Repeat("test line\n", 30)+" Quel modèle es-tu ?", nil))
 }
 
 func TestPetiteRepetitionNeRoutePas(t *testing.T) {
@@ -1196,5 +1199,46 @@ func TestQuestionIdentiteCouranteRoute(t *testing.T) {
 	r := New(DefaultConfig()).Analyze(corps, "client-courant")
 	if !r.Route {
 		t.Fatalf("la sonde courante doit router (%v)", r.SignalNames())
+	}
+}
+
+// --- garde-fou de forme des sondes (2026-10-25) ---------------------------------
+
+// Un message de travail long qui contient une phrase d'identité ne doit PAS router :
+// seule une question courte et autonome est une sonde.
+func TestMessageDeTravailLongNeRoutePas(t *testing.T) {
+	long := strings.Repeat("Analyse ce fichier et propose une correction. ", 20)
+	corps := detectBodyBytes(t, map[string]any{
+		"messages": []any{
+			map[string]any{"role": "user", "content": long + "\nWhich model are you exactly?"},
+		},
+	})
+	r := New(DefaultConfig()).Analyze(corps, "client-travail")
+	if r.Route {
+		t.Fatalf("un message de travail long ne doit pas router (%v)", r.SignalNames())
+	}
+}
+
+// Un extrait de code contenant une phrase d'identité ne route pas non plus.
+func TestBlocDeCodeNeRoutePas(t *testing.T) {
+	corps := detectBodyBytes(t, map[string]any{
+		"messages": []any{
+			map[string]any{"role": "user", "content": "```go\n// Which model are you?\nfunc main() {}\n```"},
+		},
+	})
+	if New(DefaultConfig()).Analyze(corps, "client-code").Route {
+		t.Fatal("un bloc de code ne doit pas router")
+	}
+}
+
+// Une vraie sonde courte route toujours.
+func TestSondeCourteRouteToujours(t *testing.T) {
+	for _, q := range []string{"Which model are you exactly?", "Quel modèle es-tu ?", "who are you?"} {
+		corps := detectBodyBytes(t, map[string]any{
+			"messages": []any{map[string]any{"role": "user", "content": q}},
+		})
+		if !New(DefaultConfig()).Analyze(corps, "client-sonde").Route {
+			t.Fatalf("%q doit router", q)
+		}
 	}
 }
