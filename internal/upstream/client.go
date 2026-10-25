@@ -5,6 +5,7 @@ package upstream
 import (
 	"bytes"
 	"context"
+	"crypto/sha1"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -2013,5 +2014,14 @@ func bodyShape(body []byte) string {
 			}
 		}
 	}
-	return fmt.Sprintf("msgs=%d roles=%v chars=%d max_tokens=%v stop=%v", len(msgs), roles, chars, obj["max_tokens"], obj["stop"] != nil)
+	// Empreintes de prefixe : deux requetes consecutives de la meme conversation doivent
+	// avoir le MEME prefixe. Si l'empreinte des premiers 40 000 caracteres change, c'est la
+	// que le cache est invalide (constat mbuz : seuls 7 794 jetons relus sur 331 000).
+	texte := objectTextLength(obj)
+	prefixe := texte
+	if len(prefixe) > 40000 {
+		prefixe = prefixe[:40000]
+	}
+	return fmt.Sprintf("msgs=%d roles=%v chars=%d texte=%d prefixe=%x total=%x max_tokens=%v stop=%v",
+		len(msgs), roles, chars, len(texte), sha1.Sum([]byte(prefixe)), sha1.Sum([]byte(texte)), obj["max_tokens"], obj["stop"] != nil)
 }
