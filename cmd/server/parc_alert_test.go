@@ -29,7 +29,7 @@ func TestEtatParc(t *testing.T) {
 // Les messages ne doivent contenir ni identifiant de compte, ni code d'erreur, ni nom
 // de fichier : l'exploitant veut une information generale, comprehensible.
 func TestMessageParcSansJargon(t *testing.T) {
-	for _, etat := range []string{"ok", "degrade", "critique"} {
+	for _, etat := range []string{"ok", "critique"} {
 		texte, cle, fenetre := messageParc(etat, 40, 50)
 		if cle == "" || fenetre <= 0 {
 			t.Errorf("%s : cle ou fenetre manquante", etat)
@@ -42,5 +42,9 @@ func TestMessageParcSansJargon(t *testing.T) {
 		if len([]rune(texte)) > 240 {
 			t.Errorf("%s : message trop long (%d caracteres)", etat, len([]rune(texte)))
 		}
+	}
+	// Un parc simplement ralenti ne produit AUCUN message.
+	if texte, _, _ := messageParc("degrade", 40, 50); texte != "" {
+		t.Errorf("l'etat intermediaire ne doit envoyer aucun message, obtenu %q", texte)
 	}
 }

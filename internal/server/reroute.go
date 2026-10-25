@@ -268,11 +268,9 @@ func (rr *Rerouter) probeFamily(ctx context.Context, clientModel string) (bool, 
 	})
 	if transition && rr.Alerts != nil {
 		if ok {
-			rr.Alerts.Send(alert.KeyHealthUp, "✅ Le service de secours répond de nouveau. La protection anti-détection reprend normalement.")
+			log.Printf("[fp] service de secours de nouveau disponible : la protection anti-detection reprend")
 		} else {
-			rr.Alerts.Send(alert.KeyHealthDown,
-				"🟠 Le service de secours ne répond pas pour le moment. "+
-					"Les clients ne voient rien : leurs réponses sont assurées normalement. Je surveille.")
+			log.Printf("[fp] service de secours indisponible : les reponses restent assurees par le service principal")
 		}
 	}
 	return ok, transition && !ok
@@ -362,11 +360,9 @@ func (rr *Rerouter) Probe(ctx context.Context) (bool, bool) {
 	})
 	if transition && rr.Alerts != nil {
 		if ok {
-			rr.Alerts.Send(alert.KeyHealthUp, "✅ Le service de secours répond de nouveau. La protection anti-détection reprend normalement.")
+			log.Printf("[fp] service de secours de nouveau disponible : la protection anti-detection reprend")
 		} else {
-			rr.Alerts.Send(alert.KeyHealthDown,
-				"🟠 Le service de secours ne répond pas pour le moment. "+
-					"Les clients ne voient rien : leurs réponses sont assurées normalement. Je surveille.")
+			log.Printf("[fp] service de secours indisponible : les reponses restent assurees par le service principal")
 		}
 	}
 	return ok, transition && !ok
@@ -401,13 +397,9 @@ func (rr *Rerouter) Decide(ctx context.Context, key string, now time.Time, clien
 		if rr.Alerts != nil {
 			switch reason {
 			case reasonCapClient:
-				rr.Alerts.Send(alert.KeyCapReached,
-					"ℹ️ Le plafond de sécurité des vérifications a été atteint pour un client sur cette heure. "+
-						"Le service continue de répondre normalement ; la protection reprend automatiquement.")
+				log.Printf("[fp] plafond de securite atteint pour un client sur cette heure")
 			case reasonCapGlobal:
-				rr.Alerts.Send(alert.KeyGlobalCap,
-					"ℹ️ Le plafond de sécurité global des vérifications est atteint pour cette heure. "+
-						"Le service continue de répondre normalement ; la protection reprend automatiquement.")
+				log.Printf("[fp] plafond de securite global atteint pour cette heure")
 			}
 		}
 	}
@@ -744,11 +736,8 @@ func (rr *Rerouter) noteEchecExterne(status int, err error, libelle string) {
 		log.Printf("[fp] échec de reroutage isolé (%d/%d dans la fenêtre) : pas d'alerte", n, rerouteAlertMinFailures)
 		return
 	}
-	_ = libelle
-	rr.Alerts.SendWindow(alert.KeyRerouteError, fmt.Sprintf(
-		"🟠 Le service de secours a échoué sur %d vérifications au cours des %d dernières minutes. "+
-			"Les clients ne voient rien : leurs réponses sont assurées normalement. Je surveille.",
-		n, int(rerouteAlertWindow.Minutes())), rerouteAlertWindow)
+	log.Printf("[fp] %d echecs de verification sur les %d dernieres minutes (dernier : %s http=%d) : aucun message a l'exploitant",
+		n, int(rerouteAlertWindow.Minutes()), libelle, status)
 }
 
 func str(v any) string {
@@ -857,9 +846,7 @@ func (rr *Rerouter) EvaluateRate() {
 	}
 	pct := float64(rerouted) * 100 / float64(total)
 	if pct > rr.RateAlertPercent {
-		rr.Alerts.Send(alert.KeyRerouteRate, fmt.Sprintf(
-			"🟠 Trop de vérifications d'identité ont été demandées au service de secours ces dernières minutes (%.0f%% du trafic). "+
-				"Le coût reste plafonné. Je vérifie si c'est un usage normal ou un abus.", pct))
+		log.Printf("[fp] taux de verification eleve : %.1f%% du trafic analyse (%d/%d)", pct, rerouted, total)
 	}
 }
 

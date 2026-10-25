@@ -725,24 +725,23 @@ func mergedJSON(m map[string]any) []byte {
 	return b
 }
 
-// surveillerParc previent l'exploitant sur l'ETAT DU PARC, jamais compte par compte.
+// surveillerParc previent l'exploitant des EVENEMENTS MAJEURS du parc, et de rien d'autre.
 //
-// Trois etats seulement, pour rester comprehensible sans connaitre la technique :
+// Regle de l'exploitant (2026-10-25) : « uniquement un evenement majeur sur
+// l'infrastructure, a part ca plus rien ». Deux evenements seulement :
 //
-//	"ok"       : tous les comptes (ou presque) repondent. Aucun message.
-//	"degrade"  : une partie des comptes est momentanement indisponible (limite ou solde).
-//	"critique" : moins de la moitie des comptes repond : le service peut echouer.
+//   - le service devient fortement degrade (moins de la moitie des comptes repondent) ;
+//   - le service revient a la normale apres un tel episode.
 //
-// Un message n'est envoye QUE lorsque l'etat change (plus un rappel toutes les 3 heures
-// si l'etat critique dure), avec une fenetre anti-doublon d'une heure.
+// Aucun rappel periodique, aucune notification d'etat intermediaire : un parc qui perd
+// quelques comptes est normal et ne merite pas un message.
 func surveillerParc(ctx context.Context, p *pool.Pool, notifier *alert.Notifier) {
 	if p == nil || notifier == nil || !notifier.Enabled() {
 		return
 	}
 	ticker := time.NewTicker(5 * time.Minute)
 	defer ticker.Stop()
-	dernier := "" // dernier etat annonce
-	dernierRappel := time.Now()
+	dernier := "" // dernier etat annonce ; "" = rien encore annonce
 	for {
 		select {
 		case <-ctx.Done():
@@ -754,17 +753,30 @@ func surveillerParc(ctx context.Context, p *pool.Pool, notifier *alert.Notifier)
 			continue
 		}
 		etat := etatParc(total, healthy)
-		changement := etat != dernier
-		rappel := etat == "critique" && time.Since(dernierRappel) > 3*time.Hour
-		if !changement && !rappel {
+		if etat == dernier {
 			continue
 		}
-		texte, cle, fenetre := messageParc(etat, healthy, total)
-		if notifier.SendWindow(cle, texte, fenetre) {
-			dernier = etat
-			dernierRappel = time.Now()
-			log.Printf("[pool] etat du parc annonce : %s (%d/%d disponibles)", etat, healthy, total)
+		// On n'annonce QUE les bascules vers l'etat critique et le retour a la normale
+		// qui le suit. Un demarrage en etat degrade ne produit aucun message.
+		if etat == "critique" {
+			texte, cle, fenetre := messageParc(etat, healthy, total)
+			if notifier.SendWindow(cle, texte, fenetre) {
+				dernier = etat
+				log.Printf("[pool] evenement majeur annonce : %s (%d/%d disponibles)", etat, healthy, total)
+			}
+			continue
 		}
+		if etat == "ok" && dernier == "critique" {
+			texte, cle, fenetre := messageParc(etat, healthy, total)
+			if notifier.SendWindow(cle, texte, fenetre) {
+				dernier = etat
+				log.Printf("[pool] retablissement annonce (%d/%d)", healthy, total)
+			}
+			continue
+		}
+		// Etat intermediaire : rien a annoncer, mais on retient l'etat pour savoir si un
+		// retablissement doit etre signale.
+		dernier = etat
 	}
 }
 
@@ -791,9 +803,8 @@ func messageParc(etat string, healthy, total int) (texte, cle string, fenetre ti
 			"Vos clients peuvent voir des erreurs ou des attentes. Je surveille et je vous tiens au courant.",
 			healthy, total), "pool_etat:critique", time.Hour
 	case "degrade":
-		return fmt.Sprintf("🟠 Service ralenti : %d comptes sur %d sont momentanement indisponibles. "+
-			"Le service continue de repondre. Aucune action de votre part.",
-			total-healthy, total), "pool_etat:degrade", time.Hour
+		// Etat intermediaire : aucun message (regle de l'exploitant).
+		return "", "", 0
 	default:
 		return fmt.Sprintf("✅ Service revenu a la normale : les %d comptes repondent de nouveau.", total),
 			"pool_etat:ok", time.Hour

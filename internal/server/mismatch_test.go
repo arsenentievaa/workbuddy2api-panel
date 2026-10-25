@@ -347,37 +347,23 @@ func TestReroutageSondeNormaleSansConsigneDeLangue(t *testing.T) {
 
 // --- alerte « fuite de langue » --------------------------------------------------
 
-// TestAlerteFuiteDeLangue : l'alerte se déclenche dès qu'une réponse incohérente a été
-// servie au client dans la fenêtre, et se répète au plus une fois par fenêtre.
+// TestAlerteFuiteDeLangue : une fuite de langue est JOURNALISEE mais ne notifie plus
+// l'exploitant (regle du 2026-10-25 : seulement les evenements majeurs d'infrastructure).
 func TestAlerteFuiteDeLangue(t *testing.T) {
-	ext := newFakeExternal(t, nil)
-	h, _ := mismatchHandler(t, ext, sseWithContent(zhAnswer))
-	rr := h.cfg.Rerouter
-
-	// Sans aucune fuite : silence.
-	if rr.EvaluateLanguageLeak(time.Now()) {
-		t.Fatal("aucune alerte attendue sans fuite")
-	}
-
-	// Une réponse incohérente servie (l'upstream externe est en panne) → une fuite.
 	extDown := newFakeExternal(t, func(w http.ResponseWriter, r *http.Request, body string) {
 		w.WriteHeader(http.StatusInternalServerError)
 	})
-	h2, _ := mismatchHandler(t, extDown, sseWithContent(zhAnswer))
-	rr2 := h2.cfg.Rerouter
-	postJSONClient(h2, "/v1/chat/completions", clientBody(t, enQuestion, false), "u42")
-	if lm := mismatchCounters(h2); lm["kept"] != 1 {
+	h, _ := mismatchHandler(t, extDown, sseWithContent(zhAnswer))
+	rr := h.cfg.Rerouter
+	postJSONClient(h, "/v1/chat/completions", clientBody(t, enQuestion, false), "u42")
+	if lm := mismatchCounters(h); lm["kept"] != 1 {
 		t.Fatalf("une fuite attendue : %v", lm)
 	}
-	if !rr2.EvaluateLanguageLeak(time.Now()) {
-		t.Fatal("l'alerte doit partir dès qu'une fuite existe dans la fenêtre")
+	if rr.EvaluateLanguageLeak(time.Now()) {
+		t.Fatal("aucune notification ne doit partir pour une fuite de langue")
 	}
-	// Deuxième évaluation immédiate : supprimée par la fenêtre de déduplication.
-	if rr2.EvaluateLanguageLeak(time.Now()) {
-		t.Fatal("l'alerte ne doit pas être répétée dans la même fenêtre")
-	}
-	if s := rr2.Alerts.Stats(); s.Suppressed == 0 {
-		t.Fatalf("la répétition doit être comptée comme supprimée : %+v", s)
+	if s := rr.Alerts.Stats(); s.Sent != 0 {
+		t.Fatalf("aucun message envoye attendu, obtenu %+v", s)
 	}
 }
 

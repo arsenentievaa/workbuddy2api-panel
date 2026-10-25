@@ -3,14 +3,12 @@ package server
 import (
 	"bufio"
 	"bytes"
-	"fmt"
 	"io"
 	"log"
 	"net/http"
 	"strings"
 	"time"
 
-	"github.com/linguo2625469/workbuddy2api-panel/internal/alert"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/fpdetect"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/prompt"
 )
@@ -310,8 +308,9 @@ func (rr *Rerouter) EvaluateLanguageLeak(now time.Time) bool {
 	// La fenêtre de déduplication est celle de la surveillance : tant que la fuite
 	// dure, on le rappelle à chaque fenêtre, plutôt que de laisser l'incident se
 	// prolonger derrière une alerte déjà envoyée il y a longtemps.
-	return rr.Alerts.SendWindow(alert.KeyLanguageLeak, fmt.Sprintf(
-		"🟠 %d réponse(s) sont parties dans la mauvaise langue au cours des %d dernières minutes. "+
-			"Le système a tenté de les remplacer automatiquement. Rien à faire de votre côté, je surveille.",
-		n, int(window.Minutes())), window)
+	// Notifications : l'exploitant ne veut que les evenements majeurs d'infrastructure.
+	// Une fuite de langue est desormais journalisee, jamais notifiee.
+	log.Printf("[fp] fuite de langue : %d reponse(s) incoherente(s) sur les %d dernieres minutes",
+		n, int(window.Minutes()))
+	return false
 }
