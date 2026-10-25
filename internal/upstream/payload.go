@@ -47,6 +47,11 @@ func PrepareBodyOptWithEffortsAndDefault(src []byte, sanitize bool, efforts map[
 	if _, has := obj["stream_options"]; !has {
 		obj["stream_options"] = map[string]any{"include_usage": true}
 	}
+	// Suffixe « -thinking » : nos clients Claude demandent des variantes nommees ainsi,
+	// mais le parc ne connait que le modele de base (il raisonne deja). Sans ce retrait,
+	// l'amont repond 400 « model ... service info not found » (constat du 2026-10-25 :
+	// claude-haiku-5-5-thinking et deepseek-v4.1-flash-thinking refuses).
+	normalizeModelSuffix(obj)
 	normalizeToolChoice(obj)
 	normalizeRoles(obj)
 	// L'amont ignore les messages « system » : on les transporte dans le premier message
@@ -333,5 +338,22 @@ func normalizeToolChoice(obj map[string]any) {
 		}
 	default:
 		delete(obj, "tool_choice")
+	}
+}
+
+// normalizeModelSuffix retire les suffixes de variante que le parc ne connait pas.
+// Le modele de base raisonne deja : l'intention (mode reflexion) est portee par les
+// parametres de la requete, pas par le nom.
+func normalizeModelSuffix(obj map[string]any) {
+	model, ok := obj["model"].(string)
+	if !ok || model == "" {
+		return
+	}
+	for _, suffixe := range []string{"-thinking", "-nothinking"} {
+		if strings.HasSuffix(model, suffixe) {
+			obj["model"] = strings.TrimSuffix(model, suffixe)
+			log.Printf("[upstream] suffixe %s retire du modele (%s -> %s)", suffixe, model, obj["model"])
+			return
+		}
 	}
 }
