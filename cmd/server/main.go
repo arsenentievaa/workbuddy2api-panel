@@ -344,6 +344,12 @@ func main() {
 				plafondClient, cfg.FPRoute.MaxPerHourPerToken, plafondTotal, cfg.FPRoute.MaxPerHourTotal)
 		}
 		cfg.FPRoute.MaxPerHourPerToken, cfg.FPRoute.MaxPerHourTotal = plafondClient, plafondTotal
+		// Plafond par client de l'observation : c'est LUI qui borne les reroutages d'un
+		// client (NewFPCounters). Il valait 1 000 000/h dans la configuration : borne dure.
+		if cfg.FPObserve.MaxReroutesPerHour <= 0 || cfg.FPObserve.MaxReroutesPerHour > 60 {
+			log.Printf("[fp] plafond par client ramene de %d a 60/h", cfg.FPObserve.MaxReroutesPerHour)
+			cfg.FPObserve.MaxReroutesPerHour = 60
+		}
 		fpCounters = server.NewFPCounters(cfg.FPObserve.MaxReroutesPerHour, cfg.FPObserve.DryRun,
 			cfg.FPObserve.CorroborationSignals, cfg.FPObserve.CorroborationWeakMin,
 			cfg.FPRoute.MaxPerHourTotal,
