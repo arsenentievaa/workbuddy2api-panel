@@ -362,30 +362,27 @@ func main() {
 		tgChat = cfg.Telegram.ChatID
 	}
 	notifier := alert.New(tgToken, tgChat)
-	// Alerte « compte hors service » : des qu'un compte tombe (bannissement amont, session
-	// morte, ou limite de debit), l'exploitant est prevenu. Constat du 2026-10-20 : 13 comptes
-	// avaient ete bannis sans que personne ne le sache, et le pool a fondu de 17 a 4 sans
-	// alerte. Deduplication PAR COMPTE et PAR CAUSE (30 min) : une panne de masse previent
-	// une fois par compte, un compte qui oscille ne spamme pas.
+	// Notifications d'exploitation : PARC, pas par compte.
+	//
+	// Constat du 2026-10-25 : l'exploitant recevait une rafale de messages par compte
+	// (« Compte en limite de debit : 47590162 (bbe4d786) — Cause : 6004 model rate limit »),
+	// plusieurs fois par heure, avec des identifiants et des codes d'erreur illisibles.
+	// Un compte qui oscille suffisait a noyer l'information utile.
+	//
+	// Desormais : le pool n'envoie PLUS rien par compte (les changements restent dans les
+	// journaux), et une surveillance dediee previent UNIQUEMENT lors d'un CHANGEMENT D'ETAT
+	// du parc, en francais simple, sans identifiant ni code :
+	//   - tout va bien : rien n'est envoye ;
+	//   - le parc se degrade (des comptes deviennent indisponibles) : un message ;
+	//   - le parc devient critique (moins de la moitie disponible) : un message ;
+	//   - retour a la normale : un message de retablissement.
+	// Deux messages au maximum par heure et par etat, jamais en rafale.
 	p.SetOnDown(func(kind, uid, nickname, reason string) {
-		libelle := "hors service"
-		if kind == "rate_limited" {
-			libelle = "en limite de debit (rate limit)"
-		}
-		nom := nickname
-		if nom == "" {
-			nom = uid
-		}
-		cle := "account_down:" + uid + ":" + kind
-		envoye := notifier.SendWindow(cle, fmt.Sprintf(
-			"\u26a0\ufe0f Compte %s : %s (%s)\nCause : %s\nPool : verifier /status",
-			libelle, nom, uid[:8], reason), 30*time.Minute)
-		if envoye {
-			log.Printf("[pool] alerte envoyee : compte %s (%s) %s — %s", nom, uid[:8], libelle, reason)
-		} else {
-			log.Printf("[pool] compte %s (%s) %s — alerte deja envoyee recemment", nom, uid[:8], libelle)
-		}
+		// Journal seulement : l'exploitant ne recoit plus d'alerte par compte.
+		log.Printf("[pool] compte indisponible (%s) uid=%s cause=%s", kind, uid, reason)
 	})
+	// Le demarrage de la surveillance attend ctx, cree juste apres.
+	surveiller := func(ctx context.Context) { go surveillerParc(ctx, p, notifier) }
 	if notifier.Enabled() {
 		log.Printf("alertes Telegram: activées")
 	} else {
@@ -405,7 +402,9 @@ func main() {
 			// configurée transformerait une erreur de configuration en panne totale.
 			// L'alerte et le journal rendent la situation impossible à manquer.
 			log.Printf("ERR: fp_route: %v — reroutage DÉSACTIVÉ (la route normale reste servie)", kerr)
-			notifier.Send(alert.KeyRerouteError, "⚠️ fp_route activé mais aucune clé d'upstream externe n'est lisible : le reroutage est DÉSACTIVÉ. Les sondes restent sur WorkBuddy.")
+			notifier.Send(alert.KeyRerouteError,
+				"⚠️ La protection anti-détection est désactivée : la configuration est incomplète. "+
+					"Le service répond normalement, mais les vérifications d'identité ne partent plus. À corriger.")
 		} else {
 			healthTTL := time.Duration(cfg.FPRoute.HealthTTLSeconds) * time.Second
 			log.Printf("[fp] ETAT DU REROUTAGE : actif, cible=%s, seuil=%.1f, honeypot=%d, plafond=%d/h",
@@ -484,6 +483,7 @@ func main() {
 	// Le notifieur démarre une fois ctx disponible : ses envois s'arrêtent avec le
 	// processus, sans jamais bloquer une requête.
 	notifier.Start(ctx)
+	surveiller(ctx)
 	go sch.Run(ctx)
 	// Surveillance périodique du reroutage : taux anormal et santé de l'upstream
 	// externe. Hors du chemin de requête, jamais bloquante. La sonde de santé est
@@ -723,4 +723,79 @@ func mergedJSON(m map[string]any) []byte {
 		return []byte("{}")
 	}
 	return b
+}
+
+// surveillerParc previent l'exploitant sur l'ETAT DU PARC, jamais compte par compte.
+//
+// Trois etats seulement, pour rester comprehensible sans connaitre la technique :
+//
+//	"ok"       : tous les comptes (ou presque) repondent. Aucun message.
+//	"degrade"  : une partie des comptes est momentanement indisponible (limite ou solde).
+//	"critique" : moins de la moitie des comptes repond : le service peut echouer.
+//
+// Un message n'est envoye QUE lorsque l'etat change (plus un rappel toutes les 3 heures
+// si l'etat critique dure), avec une fenetre anti-doublon d'une heure.
+func surveillerParc(ctx context.Context, p *pool.Pool, notifier *alert.Notifier) {
+	if p == nil || notifier == nil || !notifier.Enabled() {
+		return
+	}
+	ticker := time.NewTicker(5 * time.Minute)
+	defer ticker.Stop()
+	dernier := "" // dernier etat annonce
+	dernierRappel := time.Now()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+		total, healthy, _, _, _ := p.CountsDetailed()
+		if total == 0 {
+			continue
+		}
+		etat := etatParc(total, healthy)
+		changement := etat != dernier
+		rappel := etat == "critique" && time.Since(dernierRappel) > 3*time.Hour
+		if !changement && !rappel {
+			continue
+		}
+		texte, cle, fenetre := messageParc(etat, healthy, total)
+		if notifier.SendWindow(cle, texte, fenetre) {
+			dernier = etat
+			dernierRappel = time.Now()
+			log.Printf("[pool] etat du parc annonce : %s (%d/%d disponibles)", etat, healthy, total)
+		}
+	}
+}
+
+// etatParc classe l'etat du parc en trois niveaux.
+func etatParc(total, healthy int) string {
+	switch {
+	case total == 0:
+		return "ok"
+	case healthy*2 < total:
+		return "critique"
+	case healthy < total:
+		return "degrade"
+	default:
+		return "ok"
+	}
+}
+
+// messageParc redige le message (francais simple, sans identifiant ni code) et sa cle
+// anti-doublon.
+func messageParc(etat string, healthy, total int) (texte, cle string, fenetre time.Duration) {
+	switch etat {
+	case "critique":
+		return fmt.Sprintf("🔴 Service fortement degrade : seulement %d comptes sur %d repondent. "+
+			"Vos clients peuvent voir des erreurs ou des attentes. Je surveille et je vous tiens au courant.",
+			healthy, total), "pool_etat:critique", time.Hour
+	case "degrade":
+		return fmt.Sprintf("🟠 Service ralenti : %d comptes sur %d sont momentanement indisponibles. "+
+			"Le service continue de repondre. Aucune action de votre part.",
+			total-healthy, total), "pool_etat:degrade", time.Hour
+	default:
+		return fmt.Sprintf("✅ Service revenu a la normale : les %d comptes repondent de nouveau.", total),
+			"pool_etat:ok", time.Hour
+	}
 }

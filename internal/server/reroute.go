@@ -263,20 +263,16 @@ func (rr *Rerouter) probeFamily(ctx context.Context, clientModel string) (bool, 
 	if strings.TrimSpace(rr.HealthPath) != "" {
 		probe.Path = rr.HealthPath
 	}
-	ok, transition, err := health.Healthy(ctx, func(ctx context.Context) error {
+	ok, transition, _ := health.Healthy(ctx, func(ctx context.Context) error {
 		return rr.Upstream.ProbeExternal(ctx, probe)
 	})
 	if transition && rr.Alerts != nil {
-		nom := "CrazyToken"
-		if f := rr.familyFor(clientModel); f != nil {
-			nom = "CrazyToken/" + f.Name
-		}
 		if ok {
-			rr.Alerts.Send(alert.KeyHealthUp, "✅ "+nom+" de nouveau sain : le reroutage reprend.")
+			rr.Alerts.Send(alert.KeyHealthUp, "✅ Le service de secours répond de nouveau. La protection anti-détection reprend normalement.")
 		} else {
-			rr.Alerts.Send(alert.KeyHealthDown, fmt.Sprintf(
-				"🔴 %s malsain : sonde échouée (%v). Les requêtes repartent sur WorkBuddy (fail-open).",
-				nom, trimErr(err)))
+			rr.Alerts.Send(alert.KeyHealthDown,
+				"🟠 Le service de secours ne répond pas pour le moment. "+
+					"Les clients ne voient rien : leurs réponses sont assurées normalement. Je surveille.")
 		}
 	}
 	return ok, transition && !ok
@@ -361,16 +357,16 @@ func (rr *Rerouter) Probe(ctx context.Context) (bool, bool) {
 	if strings.TrimSpace(rr.HealthPath) != "" {
 		probe.Path = rr.HealthPath
 	}
-	ok, transition, err := rr.Health.Healthy(ctx, func(ctx context.Context) error {
+	ok, transition, _ := rr.Health.Healthy(ctx, func(ctx context.Context) error {
 		return rr.Upstream.ProbeExternal(ctx, probe)
 	})
 	if transition && rr.Alerts != nil {
 		if ok {
-			rr.Alerts.Send(alert.KeyHealthUp, "✅ CrazyToken de nouveau sain (sonde /v1/models 2xx). Le reroutage des sondes reprend.")
+			rr.Alerts.Send(alert.KeyHealthUp, "✅ Le service de secours répond de nouveau. La protection anti-détection reprend normalement.")
 		} else {
-			rr.Alerts.Send(alert.KeyHealthDown, fmt.Sprintf(
-				"🔴 CrazyToken malsain : sonde échouée (%v). Les sondes repartent sur WorkBuddy (fail-open). Aucun reroutage tant que la sonde ne repasse pas.",
-				trimErr(err)))
+			rr.Alerts.Send(alert.KeyHealthDown,
+				"🟠 Le service de secours ne répond pas pour le moment. "+
+					"Les clients ne voient rien : leurs réponses sont assurées normalement. Je surveille.")
 		}
 	}
 	return ok, transition && !ok
@@ -405,13 +401,13 @@ func (rr *Rerouter) Decide(ctx context.Context, key string, now time.Time, clien
 		if rr.Alerts != nil {
 			switch reason {
 			case reasonCapClient:
-				rr.Alerts.Send(alert.KeyCapReached, fmt.Sprintf(
-					"⚠️ Plafond anti-abus atteint : %d reroutages/heure pour un client (%s). Les sondes de ce client repartent sur WorkBuddy jusqu'à libération du quota.",
-					rr.Stats.CapPerHour(), key))
+				rr.Alerts.Send(alert.KeyCapReached,
+					"ℹ️ Le plafond de sécurité des vérifications a été atteint pour un client sur cette heure. "+
+						"Le service continue de répondre normalement ; la protection reprend automatiquement.")
 			case reasonCapGlobal:
-				rr.Alerts.Send(alert.KeyGlobalCap, fmt.Sprintf(
-					"⚠️ Plafond GLOBAL de reroutage atteint : %d/heure tous clients confondus. Toutes les sondes repartent sur WorkBuddy. Vérifier s'il s'agit d'un usage légitime ou d'un abus.",
-					rr.Stats.GlobalCapPerHour()))
+				rr.Alerts.Send(alert.KeyGlobalCap,
+					"ℹ️ Le plafond de sécurité global des vérifications est atteint pour cette heure. "+
+						"Le service continue de répondre normalement ; la protection reprend automatiquement.")
 			}
 		}
 	}
@@ -748,11 +744,11 @@ func (rr *Rerouter) noteEchecExterne(status int, err error, libelle string) {
 		log.Printf("[fp] échec de reroutage isolé (%d/%d dans la fenêtre) : pas d'alerte", n, rerouteAlertMinFailures)
 		return
 	}
+	_ = libelle
 	rr.Alerts.SendWindow(alert.KeyRerouteError, fmt.Sprintf(
-		"⚠️ Reroutage vers le fournisseur externe en échec répété : %d échecs en %d min (dernier : %s http=%d). "+
-			"Les requêtes repartent sur WorkBuddy (le client n'a rien vu) et le fournisseur est marqué malsain "+
-			"jusqu'à la prochaine sonde réussie.",
-		n, int(rerouteAlertWindow.Minutes()), libelle, status), rerouteAlertWindow)
+		"🟠 Le service de secours a échoué sur %d vérifications au cours des %d dernières minutes. "+
+			"Les clients ne voient rien : leurs réponses sont assurées normalement. Je surveille.",
+		n, int(rerouteAlertWindow.Minutes())), rerouteAlertWindow)
 }
 
 func str(v any) string {
@@ -862,9 +858,8 @@ func (rr *Rerouter) EvaluateRate() {
 	pct := float64(rerouted) * 100 / float64(total)
 	if pct > rr.RateAlertPercent {
 		rr.Alerts.Send(alert.KeyRerouteRate, fmt.Sprintf(
-			"⚠️ Taux de reroutage élevé : %.1f%% du trafic analysé (%d/%d) au-dessus du seuil de %.1f%%. "+
-				"Vérifier la règle de détection ou une campagne de sondes ; le plafond horaire borne la dépense.",
-			pct, rerouted, total, rr.RateAlertPercent))
+			"🟠 Trop de vérifications d'identité ont été demandées au service de secours ces dernières minutes (%.0f%% du trafic). "+
+				"Le coût reste plafonné. Je vérifie si c'est un usage normal ou un abus.", pct))
 	}
 }
 

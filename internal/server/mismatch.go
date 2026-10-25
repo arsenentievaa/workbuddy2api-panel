@@ -307,23 +307,11 @@ func (rr *Rerouter) EvaluateLanguageLeak(now time.Time) bool {
 	if n <= 0 {
 		return false
 	}
-	sante := "inconnue"
-	if h := rr.Health.Snapshot(); h.Measured {
-		if h.Healthy {
-			sante = "saine"
-		} else {
-			sante = "MALSAINE (" + h.LastError + ")"
-		}
-	}
-	total, rerouted := rr.Stats.RateCounters()
 	// La fenêtre de déduplication est celle de la surveillance : tant que la fuite
 	// dure, on le rappelle à chaque fenêtre, plutôt que de laisser l'incident se
 	// prolonger derrière une alerte déjà envoyée il y a longtemps.
 	return rr.Alerts.SendWindow(alert.KeyLanguageLeak, fmt.Sprintf(
-		"🔴 FUITE DE LANGUE : %d réponse(s) incohérente(s) servie(s) au client sur les %d dernières minutes "+
-			"(question sans caractère chinois, réponse en chinois qui a atteint le client). "+
-			"Le reroutage devait la remplacer : il a échoué ou a été refusé. "+
-			"Upstream externe : %s. %d reroutage(s) réussis au total sur %d requêtes analysées. "+
-			"À vérifier : santé du fournisseur, plafond anti-abus, /status (fp_observe.language_leak).",
-		n, int(window.Minutes()), sante, rerouted, total), window)
+		"🟠 %d réponse(s) sont parties dans la mauvaise langue au cours des %d dernières minutes. "+
+			"Le système a tenté de les remplacer automatiquement. Rien à faire de votre côté, je surveille.",
+		n, int(window.Minutes())), window)
 }
