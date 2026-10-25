@@ -359,9 +359,18 @@ func ExtractKey(body []byte) string {
 	if v := strOrEmpty(obj["prompt_cache_key"]); v != "" {
 		return v
 	}
-	// 派生回退闸：带 user 维度标识的请求不派生（契约见上）。
-	if hasUserIDKey(obj) {
-		return ""
+	// Contexte amont (2026-10-25) : la suppression de la derivation pour les requetes
+	// portant metadata.user_id faisait perdre TOUTE affinite de compte a Claude Code
+	// (qui envoie user_id mais pas conversation_id). Consequence mesuree chez un client :
+	// prompt de ~620 000 jetons, cache amont relu 2 336 jetons, 294 000 REECRITS a chaque
+	// requete — chaque tour partait sur un compte different, donc le cache de prefixe
+	// n'etait jamais relu et la facture atteignait ~2,48 $ par requete.
+	//
+	// La cle derivee reste au niveau CONVERSATION (systeme + premier message), pas au
+	// niveau utilisateur : deux conversations d'un meme client ont deux cles differentes.
+	// On privilegie donc la justesse de la facture sur la dilution theorique du parc.
+	if cle := cleSessionUtilisateur(obj); cle != "" {
+		return cle
 	}
 	return deriveKey(obj)
 }
@@ -502,4 +511,26 @@ func messageText(content any) string {
 func strOrEmpty(v any) string {
 	s, _ := v.(string)
 	return s
+}
+
+// cleSessionUtilisateur : identifiant de session stable porte par metadata.user_id.
+//
+// Claude Code envoie une valeur du type « user_<hash>_account_<uuid>_session_<uuid> » :
+// la partie session identifie la conversation, donc la cle de cache amont. Quand elle
+// est presente, on s'en sert telle quelle (prefixe « u- » pour l'isoler des ids explicites).
+func cleSessionUtilisateur(obj map[string]any) string {
+	v := ""
+	if meta, ok := obj["metadata"].(map[string]any); ok {
+		v = strOrEmpty(meta["user_id"])
+	}
+	if v == "" {
+		v = strOrEmpty(obj["user_id"])
+	}
+	if v == "" {
+		return ""
+	}
+	if i := strings.LastIndex(v, "_session_"); i >= 0 && i+len("_session_") < len(v) {
+		return "u-" + v[i+len("_session_"):]
+	}
+	return ""
 }
