@@ -52,6 +52,12 @@ func PrepareBodyOptWithEffortsAndDefault(src []byte, sanitize bool, efforts map[
 	// l'amont repond 400 « model ... service info not found » (constat du 2026-10-25 :
 	// claude-haiku-5-5-thinking et deepseek-v4.1-flash-thinking refuses).
 	normalizeModelSuffix(obj)
+	// L'amont refuse « stop » sous forme de CHAINE (400 « invalid request parameters »)
+	// mais accepte un TABLEAU. Or nos clients Claude envoient une liste de sequences
+	// d'arret ; la conversion en OpenAI la reduit a une chaine quand il n'y en a qu'une.
+	// Constate le 2026-10-25 sur le classificateur de securite de Claude Code : chaque
+	// requete portant un stop etait refusee.
+	normalizeStop(obj)
 	normalizeToolChoice(obj)
 	normalizeRoles(obj)
 	// L'amont ignore les messages « system » : on les transporte dans le premier message
@@ -355,5 +361,12 @@ func normalizeModelSuffix(obj map[string]any) {
 			log.Printf("[upstream] suffixe %s retire du modele (%s -> %s)", suffixe, model, obj["model"])
 			return
 		}
+	}
+}
+
+// normalizeStop force « stop » en tableau : l'amont rejette la forme chaine.
+func normalizeStop(obj map[string]any) {
+	if v, ok := obj["stop"].(string); ok && strings.TrimSpace(v) != "" {
+		obj["stop"] = []any{v}
 	}
 }

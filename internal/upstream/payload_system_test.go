@@ -77,3 +77,17 @@ func TestSansSystemeInchange(t *testing.T) {
 		t.Fatalf("%d messages, attendu 2", len(msgs))
 	}
 }
+
+// L'amont refuse « stop » en chaine : la forme tableau doit etre imposee.
+func TestStopChaineDevientTableau(t *testing.T) {
+	obj := corpsApresTransformation(t, `{"model":"m","stop":"</severity>","messages":[{"role":"user","content":"x"}]}`)
+	arr, ok := obj["stop"].([]any)
+	if !ok || len(arr) != 1 || arr[0] != "</severity>" {
+		t.Fatalf("stop doit etre un tableau d'une entree, obtenu %v", obj["stop"])
+	}
+	// Un tableau deja correct n'est pas altere.
+	obj2 := corpsApresTransformation(t, `{"model":"m","stop":["a","b"],"messages":[{"role":"user","content":"x"}]}`)
+	if arr2, _ := obj2["stop"].([]any); len(arr2) != 2 {
+		t.Fatalf("tableau altere: %v", obj2["stop"])
+	}
+}
