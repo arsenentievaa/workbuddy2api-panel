@@ -599,8 +599,13 @@ func Classify(status int, body string) ErrKind {
 		// 归 ErrBadParams：不冷却/不熔断/不计错，但**仍然轮转**（不同账号可能有不同的
 		// 模型权限，值得再试一次）。
 		if strings.Contains(body, badParamsMarkerMsg) || strings.Contains(body, badParamsMarkerCode) {
+			// Diagnostic sans contenu : de quoi identifier la FORME de la requete refusee
+			// (le client ne recoit qu'un message generique). Journalise une seule fois par
+			// refus, jamais le texte des messages.
+			log.Printf("[upstream] 400 parametres invalides %s", bodyFingerprint(body))
 			return ErrBadParams
 		}
+		log.Printf("[upstream] 4xx inattendu %s", bodyFingerprint(body))
 		return ErrClient
 	}
 	// HTTP 200 但业务 code 非 0 且含余额关键词的情况已被上面 hardMarkers 捕获。
