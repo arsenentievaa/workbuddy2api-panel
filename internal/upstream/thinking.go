@@ -158,6 +158,18 @@ func injectThinking(obj map[string]any, defaultEffort string) {
 	if !isDeepSeekModel(model) {
 		return
 	}
+	// BUDGET DE SORTIE MINUSCULE : le raisonnement mangerait tout le budget et le client
+	// ne recevrait aucun texte exploitable. Cas reel du 2026-10-25 : le classificateur de
+	// securite de Claude Code envoie max_tokens=64 ; le modele reflechissait dans ces 64
+	// jetons, ne rendait aucun verdict, et Claude Code bloquait TOUS les appels d'outils
+	// (« claude-opus-5-5 is temporarily unavailable »). On desactive donc le raisonnement
+	// quand le budget est trop court pour lui.
+	if budgetTropCourt(obj) {
+		obj["thinking"] = map[string]any{"type": "disabled"}
+		delete(obj, "reasoning_effort")
+		delete(obj, "reasoningEffort")
+		return
+	}
 	th, ok := obj["thinking"].(map[string]any)
 	typ := ""
 	if ok {
@@ -201,4 +213,19 @@ func ensureDeepSeekEffort(obj map[string]any, defaultEffort string) {
 		defaultEffort = defaultDeepSeekEffort
 	}
 	obj["reasoning_effort"] = defaultEffort
+}
+
+// seuilBudgetSansRaisonnement : en dessous de ce nombre de jetons de sortie, le
+// raisonnement ne laisse aucune place a la reponse. 256 couvre les classificateurs et
+// autres appels courts, sans toucher aux reponses normales.
+const seuilBudgetSansRaisonnement = 256
+
+// budgetTropCourt : max_tokens (ou max_completion_tokens) <= seuil.
+func budgetTropCourt(obj map[string]any) bool {
+	for _, cle := range []string{"max_tokens", "max_completion_tokens"} {
+		if v, ok := num64(obj[cle]); ok && v > 0 && v <= seuilBudgetSansRaisonnement {
+			return true
+		}
+	}
+	return false
 }
