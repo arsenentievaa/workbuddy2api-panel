@@ -3,6 +3,7 @@ package server
 import (
 	"bytes"
 	"encoding/json"
+	"io"
 	"net/http"
 	"strings"
 	"sync/atomic"
@@ -111,29 +112,22 @@ func mismatchCounters(h *Handler) map[string]int64 {
 
 // --- non-flux --------------------------------------------------------------------
 
-func TestMismatchNonFluxReroute(t *testing.T) {
+func TestMismatchNonFluxSansAppelExterne(t *testing.T) {
+	// Regle du 2026-10-25 : plus aucun remede payant pour une fuite de langue.
 	ext := newFakeExternal(t, nil)
 	h, _ := mismatchHandler(t, ext, sseWithContent(zhAnswer))
 
 	rec := postJSONClient(h, "/v1/chat/completions", clientBody(t, enQuestion, false), "u42")
-	if rec.Code != 200 {
-		t.Fatalf("code=%d corps=%s", rec.Code, rec.Body.String())
+	if n := ext.callCount(); n != 0 {
+		t.Fatalf("aucun appel externe attendu, %d", n)
 	}
-	if n := ext.callCount(); n != 1 {
-		t.Fatalf("l'upstream externe doit être appelé une fois, %d", n)
-	}
-	if !strings.Contains(rec.Body.String(), externalTxt) {
-		t.Fatalf("le client doit recevoir la réponse de l'externe : %s", rec.Body.String()[:200])
-	}
-	if strings.Contains(rec.Body.String(), "巴黎") {
-		t.Fatalf("la réponse incohérente ne doit pas atteindre le client : %s", rec.Body.String()[:200])
+	corps := rec.Body.String()
+	if strings.Contains(corps, "巴黎") {
+		t.Fatalf("la reponse incoherente ne doit pas atteindre le client : %s", corps[:200])
 	}
 	lm := mismatchCounters(h)
-	if lm["detected"] != 1 || lm["rerouted"] != 1 || lm["kept"] != 0 {
+	if lm["detected"] != 1 || lm["rerouted"] != 0 {
 		t.Fatalf("compteurs : %v", lm)
-	}
-	if by := h.cfg.FPStats.Snapshot()["by_signal"].(map[string]int64); by[fpdetect.SigLanguageMismatch] != 1 {
-		t.Fatalf("le signal doit apparaître dans la ventilation : %v", by)
 	}
 }
 
@@ -185,7 +179,7 @@ func TestMismatchFailOpenConserveLaReponse(t *testing.T) {
 
 // --- flux ------------------------------------------------------------------------
 
-func TestMismatchFluxReroute(t *testing.T) {
+func TestMismatchFluxSansAppelExterne(t *testing.T) {
 	ext := newFakeExternal(t, func(w http.ResponseWriter, r *http.Request, body string) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		_, _ = w.Write([]byte(sseExternal))
@@ -194,17 +188,11 @@ func TestMismatchFluxReroute(t *testing.T) {
 
 	rec := postJSONClient(h, "/v1/chat/completions", clientBody(t, enQuestion, true), "u42")
 	body := rec.Body.String()
-	if n := ext.callCount(); n != 1 {
-		t.Fatalf("l'upstream externe doit être appelé (%d)", n)
-	}
-	if !strings.Contains(body, "data: [DONE]") {
-		t.Fatalf("le flux externe doit être relayé : %s", body[:200])
+	if n := ext.callCount(); n != 0 {
+		t.Fatalf("aucun appel externe attendu (%d)", n)
 	}
 	if strings.Contains(body, "巴黎") {
 		t.Fatalf("les trames chinoises ne doivent pas atteindre le client : %s", body[:200])
-	}
-	if lm := mismatchCounters(h); lm["rerouted"] != 1 {
-		t.Fatalf("compteurs : %v", lm)
 	}
 }
 
@@ -310,20 +298,33 @@ func TestCompletionText(t *testing.T) {
 // rien. La requête rejouée doit porter une consigne de langue — et SEULEMENT celle-là :
 // le trafic normal ne doit pas la recevoir.
 func TestMismatchDemandeLaLangueDeLUtilisateur(t *testing.T) {
+	// Le remede se fait desormais sur le PARC : c'est le rejeu interne qui doit porter la
+	// consigne de langue (le fournisseur externe n'est plus appele du tout).
+	ancien := leakRetryDo
+	var corps []byte
+	leakRetryDo = func(req *http.Request) (*http.Response, error) {
+		corps, _ = io.ReadAll(req.Body)
+		reponse := `{"choices":[{"message":{"content":"` + externalTxt + `"}}]}`
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"application/json"}},
+			Body:       io.NopCloser(strings.NewReader(reponse)),
+		}, nil
+	}
+	defer func() { leakRetryDo = ancien }()
+
 	ext := newFakeExternal(t, nil)
 	h, _ := mismatchHandler(t, ext, sseWithContent(zhAnswer))
-
 	postJSONClient(h, "/v1/chat/completions", clientBody(t, enQuestion, false), "u42")
-	sent := ext.last.Load().(string)
-	// Le remède envoie la consigne STRICTE (dernier recours) : elle doit nommer la langue
-	// des messages de l'utilisateur et interdire explicitement le chinois.
-	if !strings.Contains(sent, "language of the user's messages") || !strings.Contains(sent, "Chinese") {
-		t.Fatalf("la requête rejouée doit porter la consigne de langue : %s", tronque(sent))
+
+	if !strings.Contains(string(corps), "same language as the user's messages") || !strings.Contains(string(corps), "Chinese") {
+		t.Fatalf("le rejeu doit porter la consigne de langue : %s", tronque(string(corps)))
 	}
-	// Le corps d'origine du client n'est pas modifié (le test vérifie indirectement que
-	// la consigne a été ajoutée par lesystem prompt, pas en écrasant la question).
-	if !strings.Contains(sent, enQuestion) {
-		t.Fatalf("la question du client doit être conservée : %s", tronque(sent))
+	if !strings.Contains(string(corps), enQuestion) {
+		t.Fatalf("la question du client doit etre conservee : %s", tronque(string(corps)))
+	}
+	if ext.callCount() != 0 {
+		t.Fatalf("aucun appel externe attendu")
 	}
 }
 
@@ -372,24 +373,21 @@ func TestAlerteFuiteDeLangue(t *testing.T) {
 // 2026-10-02 : `language_mismatch{detected:4, kept:4, rerouted:0}` alors que le plafond
 // des sondes, partagé, était saturé (over_cap 15 108) — quatre réponses chinoises
 // servies à des clients faute d'un budget propre au remède.
-func TestFuiteDeLangueRerouteMalgrePlafondSondes(t *testing.T) {
+func TestFuiteDeLangueRepareeSansAppelExterne(t *testing.T) {
+	// Le remede ne depend plus du tout du budget des sondes ni du fournisseur externe :
+	// il se fait sur notre parc (rejeu interne), et rien ne part chez le fournisseur.
 	ext := newFakeExternal(t, nil)
 	h, _ := mismatchHandler(t, ext, sseWithContent(zhAnswer))
 	rr := h.cfg.Rerouter
-	// Plafond GLOBAL des sondes saturé (1, déjà consommé par un autre client).
 	rr.Stats = NewFPCounters(20, false, nil, 2, 1, 15*time.Minute)
 	rr.Stats.AllowReroute("autre", time.Now())
 
 	rec := postJSONClient(h, "/v1/chat/completions", clientBody(t, enQuestion, false), "u42")
 	if strings.Contains(rec.Body.String(), "巴黎") {
-		t.Fatalf("une réponse chinoise ne doit plus passer : le remède est indépendant des sondes : %s", rec.Body.String()[:200])
+		t.Fatalf("une reponse chinoise ne doit pas passer : %s", rec.Body.String()[:200])
 	}
-	if n := ext.callCount(); n != 1 {
-		t.Fatalf("l'upstream externe doit être appelé une fois malgré le plafond de sondes : %d", n)
-	}
-	lm := mismatchCounters(h)
-	if lm["rerouted"] != 1 || lm["kept"] != 0 {
-		t.Fatalf("le remède doit avoir eu lieu : %v", lm)
+	if n := ext.callCount(); n != 0 {
+		t.Fatalf("aucun appel externe attendu, obtenu %d", n)
 	}
 }
 

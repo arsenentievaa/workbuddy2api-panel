@@ -145,7 +145,6 @@ func (h *Handler) rerouteOnMismatch(w http.ResponseWriter, r *http.Request, body
 		return false
 	}
 	now := time.Now()
-	key := rerouteIdentity(r, body, rr.ClientIDHeader)
 	// Un rejeu de remède ne se remédie pas lui-même (voir leak_retry.go) : sans cette
 	// garde, une réponse rejouée qui fuit encore déclencherait un rejeu sans fin.
 	if h.isLeakRetry(r) {
@@ -176,57 +175,15 @@ func (h *Handler) rerouteOnMismatch(w http.ResponseWriter, r *http.Request, body
 		return true
 	}
 
-	// Le budget ne couvre donc plus que le remède payant, et il est consulté ICI.
-	budgetOK, budgetReason := true, ""
-	if rr.Stats != nil {
-		budgetOK, budgetReason = rr.Stats.AllowLeakReroute(key, now)
-	}
-
-	// 2) REMÈDE PAR LE FOURNISSEUR EXTERNE (chemin historique). La santé de ce fournisseur est
-	//    vérifiée ici et non avant le rejeu : elle ne conditionne que ce chemin. La logique de
-	//    DecideLeak est reprise sur place pour ne pas consommer le budget une seconde fois.
-	healthy, justDown := rr.probeFamily(r.Context(), clientModel)
-	if !healthy && justDown && rr.Stats != nil {
-		rr.Stats.NoteHealthBlocked()
-	}
-	allowed, reason := budgetOK, budgetReason
-	if allowed && !healthy {
-		allowed, reason = false, reasonHealth
-	}
-	if !allowed {
-		// Refus (budget dédié atteint, upstream malsain) : plus aucune reprise n'est
-		// possible. La réponse chinoise n'est PAS servie (règle du 2026-10-20 : rien ne
-		// passe hors conversation réellement chinoise) — le client reçoit une erreur
-		// claire, qu'il peut relancer, au lieu d'un texte inutilisable.
-		if h.cfg.FPStats != nil {
-			h.cfg.FPStats.NoteMismatchKept(now)
-		}
-		log.Printf("[fp] désaccord de langue : remède refusé (%s) -> réponse chinoise ÉCARTÉE, erreur renvoyée", reason)
-		writeOpenAIError(w, http.StatusBadGateway, "language_guard",
-			"the answer came back in an unexpected language; please retry")
-		st.status = http.StatusBadGateway
-		return true
-	}
-	st.route = "crazy"
-	// Le prompt système de la passerelle est en chinois : sans cette consigne, le
-	// modèle de remplacement répond en chinois à son tour et le client ne voit aucune
-	// différence — on aurait déplacé le symptôme au lieu de le corriger. La directive
-	// n'est ajoutée QUE sur ce chemin.
-	outbound := prompt.Append(body, prompt.LanguageStrict)
-	if h.tryExternalVerified(w, r, body, outbound, clientModel, stream, st) {
-		if h.cfg.FPStats != nil {
-			h.cfg.FPStats.NoteMismatchRerouted()
-		}
-		return true
-	}
-	// Toutes les reprises ont échoué (parc normal, parc strict, fournisseur externe
-	// vérifié). La réponse chinoise n'est pas servie : une erreur claire vaut mieux qu'un
-	// texte que le client ne peut pas lire, et elle est relançable.
+	// PLUS AUCUN REMÈDE EXTERNE (règle de l'exploitant, 2026-10-25) : le fournisseur
+	// payant ne doit être sollicité que pour une vérification d'identité. Une fuite de
+	// langue se répare sur notre propre parc (rejeux gratuits ci-dessus) ; si elle
+	// persiste, la réponse chinoise n'est pas servie et le client reçoit une erreur
+	// claire, relançable.
 	if h.cfg.FPStats != nil {
 		h.cfg.FPStats.NoteMismatchKept(now)
 	}
-	st.route = ""
-	log.Printf("[fp] désaccord de langue : toutes les reprises échoué -> réponse chinoise ÉCARTÉE, erreur renvoyée")
+	log.Printf("[fp] désaccord de langue : rejeux sur le parc insuffisants -> réponse chinoise ÉCARTÉE, erreur renvoyée (aucun appel externe)")
 	writeOpenAIError(w, http.StatusBadGateway, "language_guard",
 		"the answer came back in an unexpected language; please retry")
 	st.status = http.StatusBadGateway

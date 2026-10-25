@@ -39,19 +39,26 @@ func TestRemedeExterneEncoreChinoisNEstPasServi(t *testing.T) {
 }
 
 // Quand le fournisseur externe répond correctement, il est servi — et vérifié.
-func TestRemedeExterneVerifieSertLaReponseCorrecte(t *testing.T) {
+func TestRemedeExternePlusUtilise(t *testing.T) {
+	// Regle du 2026-10-25 : le fournisseur externe n'est plus sollicite pour une fuite de
+	// langue. Le remede se fait sur notre parc ; s'il echoue, le client recoit une erreur
+	// claire et AUCUN appel externe n'est emis.
+	appelsExternes := 0
 	ext := newFakeExternal(t, func(w http.ResponseWriter, r *http.Request, body string) {
+		appelsExternes++
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"id":"x","object":"chat.completion","choices":[{"index":0,"message":{"role":"assistant","content":"Paris is the capital of France."}}]}`))
 	})
 	h, _ := mismatchHandler(t, ext, sseWithContent(zhAnswer))
-
 	rec := postJSONClient(h, "/v1/chat/completions", clientBody(t, enQuestion, false), "u42")
-	if !strings.Contains(rec.Body.String(), "Paris") {
-		t.Fatalf("la réponse vérifiée du fournisseur doit être servie : %s", rec.Body.String()[:200])
+	if appelsExternes != 0 {
+		t.Fatalf("aucun appel externe attendu, obtenu %d", appelsExternes)
 	}
-	if lm := mismatchCounters(h); lm["rerouted"] != 1 || lm["kept"] != 0 {
+	if lm := mismatchCounters(h); lm["rerouted"] != 0 {
 		t.Fatalf("compteurs : %v", lm)
+	}
+	if !strings.Contains(rec.Body.String(), "unexpected language") && !strings.Contains(rec.Body.String(), "Paris") {
+		t.Fatalf("reponse inattendue : %s", rec.Body.String()[:200])
 	}
 }
 
