@@ -116,7 +116,7 @@ func TestExtractKeyPriority(t *testing.T) {
 	}{
 		{`{"metadata":{"conversation_id":"mc","user_id":"mu"},"conversation_id":"top"}`, "mc"}, // metadata.conversation_id 优先
 		{`{"conversation_id":"top"}`, "top"},                                                   // 顶层 conversation_id
-		{`{"metadata":{"user_id":"mu"}}`, ""},                                                  // user_id 已剔除粘性键（粒度过粗），回落轮换
+		{`{"metadata":{"user_id":"mu"}}`, ""},                                                  // user_id seul, sans messages : rien a deriver
 		{`{"metadata":{"conversation_id":123}}`, ""},                                           // 非字符串 → 空
 		{`not-json`, ""}, // 非法 JSON → 空
 		// issue #35：客户端实际发 camelCase conversationId，ExtractKey 必须识别。
@@ -347,5 +347,49 @@ func TestExtractKeyMultimodalContent(t *testing.T) {
 	imgOnly2 := `{"messages":[{"role":"user","content":[{"type":"image_url","image_url":{"url":"http://x/z.png"}}]}]}`
 	if ExtractKey([]byte(imgOnly2)) != k2 {
 		t.Error("pure-image url changes must keep same derived key")
+	}
+}
+
+// --- affinite Claude Code (2026-10-25) -------------------------------------------
+
+// Claude Code envoie metadata.user_id sans conversation_id. L'identifiant de session
+// qu'il contient doit devenir la cle d'affinite : sans cela, chaque tour partait sur un
+// compte amont different et le cache de prefixe n'etait jamais relu (facture x5).
+func TestExtractKeyClaudeCodeSession(t *testing.T) {
+	corps := `{"metadata":{"user_id":"user_abc123_account_def456_session_9f8e7d6c-1111-2222"},"messages":[{"role":"user","content":"bonjour"}]}`
+	got := ExtractKey([]byte(corps))
+	if got != "u-9f8e7d6c-1111-2222" {
+		t.Fatalf("cle de session attendue, obtenu %q", got)
+	}
+}
+
+// Sans identifiant de session, on derive de la conversation : deux tours de la meme
+// conversation donnent la meme cle, deux conversations differentes non.
+func TestExtractKeyAvecUserIdDeriveLaConversation(t *testing.T) {
+	turn1 := `{"metadata":{"user_id":"user_abc_device_x"},"messages":[{"role":"user","content":"premier message"}]}`
+	turn2 := `{"metadata":{"user_id":"user_abc_device_x"},"messages":[{"role":"user","content":"premier message"},{"role":"assistant","content":"ok"},{"role":"user","content":"suite"}]}`
+	autre := `{"metadata":{"user_id":"user_abc_device_x"},"messages":[{"role":"user","content":"autre conversation"}]}`
+	k1, k2 := ExtractKey([]byte(turn1)), ExtractKey([]byte(turn2))
+	if k1 == "" || k1 != k2 {
+		t.Fatalf("la cle doit rester stable dans la conversation : %q / %q", k1, k2)
+	}
+	if ExtractKey([]byte(autre)) == k1 {
+		t.Fatal("deux conversations differentes doivent avoir deux cles")
+	}
+}
+
+// Aucun client ne doit se retrouver sans cle d'affinite quand une conversation est
+// identifiable : c'est la garantie que le cache sera relu, donc facture correcte.
+func TestExtractKeyJamaisVidePourUneConversation(t *testing.T) {
+	cas := []string{
+		`{"messages":[{"role":"user","content":"bonjour"}]}`,
+		`{"metadata":{"user_id":"user_x"},"messages":[{"role":"user","content":"bonjour"}]}`,
+		`{"metadata":{"user_id":"user_x_account_y_session_z"},"messages":[{"role":"user","content":"bonjour"}]}`,
+		`{"system":"tu es un assistant","messages":[{"role":"user","content":"bonjour"}]}`,
+	}
+	for _, corps := range cas {
+		if ExtractKey([]byte(corps)) == "" {
+			t.Errorf("cle vide pour %s", corps)
+		}
 	}
 }
