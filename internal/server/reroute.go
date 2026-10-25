@@ -460,7 +460,7 @@ func (rr *Rerouter) appelExterne(ctx context.Context, body []byte, clientModel, 
 	// Aucune famille configurée : comportement historique à cible unique (le modèle du
 	// client est transmis tel quel s'il est plausible chez le fournisseur).
 	if rr.familyFor(clientModel) == nil {
-		sentBody, outModel := rr.outboundBody(body)
+		sentBody, outModel := rr.outboundBody(body, reason != "leak")
 		if outModel == "" {
 			return nil, "", fmt.Errorf("modèle indisponible")
 		}
@@ -479,7 +479,7 @@ func (rr *Rerouter) appelExterne(ctx context.Context, body []byte, clientModel, 
 		if i >= 3 || time.Now().After(limite) {
 			break
 		}
-		out := rr.outboundBodyFor(body, clientModel, m)
+		out := rr.outboundBodyFor(body, clientModel, m, reason != "leak")
 		if out == nil {
 			return nil, "", fmt.Errorf("corps vide")
 		}
@@ -501,7 +501,7 @@ func (rr *Rerouter) appelExterne(ctx context.Context, body []byte, clientModel, 
 		case <-ctx.Done():
 		case <-time.After(500 * time.Millisecond):
 		}
-		if out := rr.outboundBodyFor(body, clientModel, models[0]); out != nil && !time.Now().After(limite) {
+		if out := rr.outboundBodyFor(body, clientModel, models[0], reason != "leak"); out != nil && !time.Now().After(limite) {
 			derniere := avecIdentite(out, clientModel)
 			res, err := rr.sendExternal(ctx, target, derniere, clientIP, stream)
 			rr.noteExternal(reason, len(derniere), err)
@@ -525,7 +525,7 @@ func (rr *Rerouter) appelExterne(ctx context.Context, body []byte, clientModel, 
 			if i >= 2 || time.Now().After(limite) {
 				break
 			}
-			out := rr.outboundBodyFor(body, "claude", m)
+			out := rr.outboundBodyFor(body, "claude", m, reason != "leak")
 			if out == nil {
 				continue
 			}
@@ -766,7 +766,7 @@ func str(v any) string {
 // outboundBodyFor prépare le corps pour une famille et un modèle de fournisseur donnés.
 // Le corps du client n'est jamais modifié sur place : la route normale peut encore en
 // avoir besoin après un échec.
-func (rr *Rerouter) outboundBodyFor(body []byte, clientModel, model string) []byte {
+func (rr *Rerouter) outboundBodyFor(body []byte, clientModel, model string, trim bool) []byte {
 	if rr == nil {
 		return nil
 	}
@@ -777,11 +777,13 @@ func (rr *Rerouter) outboundBodyFor(body []byte, clientModel, model string) []by
 	// Sonde : on n'envoie que le dernier message du client et un systeme court. Le reste
 	// de la conversation (outils, historique, fichiers) ne sert pas a repondre « quel
 	// modele es-tu ? » et coutait des centaines de milliers de jetons par appel.
-	out = upstream.TrimForProbe(out, rr.ProbeSystemMaxBytes)
+	if trim {
+		out = upstream.TrimForProbe(out, rr.ProbeSystemMaxBytes)
+	}
 	return out
 }
 
-func (rr *Rerouter) outboundBody(body []byte) ([]byte, string) {
+func (rr *Rerouter) outboundBody(body []byte, trim bool) ([]byte, string) {
 	target := rr.Target
 	if strings.TrimSpace(target.BaseURL) == "" || strings.TrimSpace(target.APIKey) == "" {
 		return nil, ""
@@ -801,6 +803,12 @@ func (rr *Rerouter) outboundBody(body []byte) ([]byte, string) {
 	// s'applique).
 	if rr.MaxTokensCeiling > 0 {
 		out = clampMaxTokens(out, rr.MaxTokensCeiling)
+	}
+	// Meme allegement que sur les autres chemins : une sonde n'emporte que le dernier
+	// message du client et un systeme court. Le remede d'une fuite de langue, lui, garde
+	// tout le contexte (il doit reconstruire une reponse correcte dans la bonne langue).
+	if trim {
+		out = upstream.TrimForProbe(out, rr.ProbeSystemMaxBytes)
 	}
 	return out, model
 }
