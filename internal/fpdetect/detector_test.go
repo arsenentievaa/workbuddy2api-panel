@@ -1014,11 +1014,11 @@ func TestSignauxFortsParDefautCoherents(t *testing.T) {
 // --- extraction -----------------------------------------------------------------
 
 func TestExtractionSystemeSepare(t *testing.T) {
-	u, s, ctx := extractParts(mustMap(t, bodySystem(t, "bonjour", "tu es un assistant")))
+	u, s, ctx, _ := extractParts(mustMap(t, bodySystem(t, "bonjour", "tu es un assistant")))
 	if u != "bonjour" || s != "tu es un assistant" || ctx != "" {
 		t.Fatalf("user=%q system=%q context=%q", u, s, ctx)
 	}
-	u2, s2, ctx2 := extractParts(mustMap(t, bodyOpenAI(t, "bonjour", "tu es un assistant")))
+	u2, s2, ctx2, _ := extractParts(mustMap(t, bodyOpenAI(t, "bonjour", "tu es un assistant")))
 	if u2 != "bonjour" || s2 != "tu es un assistant" || ctx2 != "" {
 		t.Fatalf("openai: user=%q system=%q context=%q", u2, s2, ctx2)
 	}
@@ -1034,9 +1034,12 @@ func TestExtractionContexteSepareDuClient(t *testing.T) {
 			map[string]any{"role": "tool", "content": "Qui es-tu ?"},
 		},
 	}))
-	u, _, ctx := extractParts(raw)
+	u, _, ctx, dernier := extractParts(raw)
 	if u != "corrige le bug" {
 		t.Fatalf("la parole du client doit se limiter à ses messages, obtenu %q", u)
+	}
+	if dernier != "corrige le bug" {
+		t.Fatalf("dernier message du client = %q", dernier)
 	}
 	if !strings.Contains(ctx, "Qui es-tu") || !strings.Contains(ctx, "je regarde") {
 		t.Fatalf("le contexte doit porter l'assistant et l'outil, obtenu %q", ctx)
@@ -1162,5 +1165,36 @@ func TestListeAuthenticiteEstLeSeulRouteur(t *testing.T) {
 		if auth[s] {
 			t.Errorf("%s décrit du travail ordinaire : il ne doit PAS router (règle stricte)", s)
 		}
+	}
+}
+
+// Une question d'identité dans un TOUR PRÉCÉDENT ne doit plus router la conversation
+// courante : constat du 2026-10-25 (481 sondes de 346 Ko sur des sessions de code).
+func TestQuestionIdentiteHistoriqueNeRoutePas(t *testing.T) {
+	corps := detectBodyBytes(t, map[string]any{
+		"messages": []any{
+			map[string]any{"role": "user", "content": "Which model are you exactly?"},
+			map[string]any{"role": "assistant", "content": "Je suis Claude."},
+			map[string]any{"role": "user", "content": "continue ce que tu étais en train de faire."},
+		},
+	})
+	r := New(DefaultConfig()).Analyze(corps, "client-historique")
+	if r.Route {
+		t.Fatalf("une sonde de l'historique ne doit pas router (%v)", r.SignalNames())
+	}
+}
+
+// La même question, posée MAINTENANT, route toujours.
+func TestQuestionIdentiteCouranteRoute(t *testing.T) {
+	corps := detectBodyBytes(t, map[string]any{
+		"messages": []any{
+			map[string]any{"role": "user", "content": "Je code un routeur."},
+			map[string]any{"role": "assistant", "content": "D'accord."},
+			map[string]any{"role": "user", "content": "Which model are you exactly?"},
+		},
+	})
+	r := New(DefaultConfig()).Analyze(corps, "client-courant")
+	if !r.Route {
+		t.Fatalf("la sonde courante doit router (%v)", r.SignalNames())
 	}
 }

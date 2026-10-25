@@ -364,7 +364,7 @@ func (d *Detector) AnalyzeResponse(reqBody []byte, output string) Result {
 	if err := json.Unmarshal(reqBody, &raw); err != nil {
 		return res
 	}
-	input, _, _ := extractParts(raw)
+	input, _, _, _ := extractParts(raw)
 	if !languageMismatch(input, output) {
 		return res
 	}
@@ -504,8 +504,13 @@ func (d *Detector) AnalyzeAt(body []byte, clientKey string, now time.Time) Resul
 	if err := json.Unmarshal(body, &raw); err != nil {
 		return Result{} // corps illisible : aucun signal, l'appelant retombe en route normale
 	}
-	user, system, context := extractParts(raw)
+	user, system, context, dernier := extractParts(raw)
 	userLower := strings.ToLower(user)
+	// Les questions d'identite ne sont cherchees que dans le DERNIER message du client :
+	// balayer tout l'historique faisait router une conversation entiere parce qu'un tour
+	// precedent — ou un fichier colle — contenait « which model are you ». Constat du
+	// 2026-10-25 : 481 sondes de 346 Ko de moyenne pour des sessions de code.
+	dernierLower := strings.ToLower(dernier)
 	// fullLower sert au SEUL balayage des jetons pièges : il garde tout le texte.
 	fullLower := userLower + "\n" + strings.ToLower(system) + "\n" + strings.ToLower(context)
 
@@ -537,11 +542,11 @@ func (d *Detector) AnalyzeAt(body []byte, clientKey string, now time.Time) Resul
 	//    question commerciale légitime — « Which model is best for summarisation? ».
 	//    Elles ne comptent donc que sur une requête très brève (une sonde), sinon
 	//    elles enverraient du trafic client normal vers le modèle payant.
-	if strict, loose := firstIdentityHit(userLower); strict != "" {
+	if strict, loose := firstIdentityHit(dernierLower); strict != "" {
 		add(SigModelQuestion, "question explicite sur l'identité")
-	} else if loose != "" && len([]rune(user)) <= looseIdentityMaxRunes {
+	} else if loose != "" && len([]rune(dernier)) <= looseIdentityMaxRunes {
 		add(SigModelQuestion, "forme brève « quel modèle »")
-	} else if ok, why := structuralIdentityQuestion(user); ok {
+	} else if ok, why := structuralIdentityQuestion(dernier); ok {
 		// Règle structurelle, toutes langues : 2e personne + mot d'identité (ou
 		// interrogatif) dans une question courte. Elle rattrape les tournures que la
 		// liste de phrases ne connaît pas — c'est elle qui rend la détection tenable
@@ -934,8 +939,9 @@ func textOf(v any) string {
 // Les règles de sonde ne lisent donc que `user` ; seul le balayage des jetons pièges garde
 // le texte complet (un jeton piège peut très bien arriver par un fichier ou un outil, et il
 // ne prête pas à confusion).
-func extractParts(raw map[string]any) (string, string, string) {
+func extractParts(raw map[string]any) (string, string, string, string) {
 	var user, sys, ctx strings.Builder
+	var dernier string
 	if s := textOf(raw["system"]); s != "" {
 		sys.WriteString(s)
 	}
@@ -952,13 +958,16 @@ func extractParts(raw map[string]any) (string, string, string) {
 				sys.WriteString(txt)
 			case "user":
 				user.WriteString(txt)
+				if txt != "" {
+					dernier = txt
+				}
 			default:
 				// assistant, tool, function : du CONTEXTE, pas la parole du client.
 				ctx.WriteString(txt)
 			}
 		}
 	}
-	return user.String(), sys.String(), ctx.String()
+	return user.String(), sys.String(), ctx.String(), dernier
 }
 
 func estimateTokens(s string) int { return len(s) / 4 }

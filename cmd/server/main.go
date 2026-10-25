@@ -414,7 +414,10 @@ func main() {
 				Enabled: true,
 				DryRun:  cfg.FPObserve.DryRun,
 				// Trois premiers échanges servis par le fournisseur externe.
-				HoneypotTurns: 0, // honeypot désactivé : il envoyait les 3 premiers échanges de CHAQUE conversation chez le fournisseur payant
+				// Une sonde n'emporte qu'un prompt systeme court (8 Ko au plus) : le reste
+				// n'aide pas a repondre et coute plein tarif chez le fournisseur externe.
+				ProbeSystemMaxBytes: 8192,
+				HoneypotTurns:       0, // honeypot désactivé : il envoyait les 3 premiers échanges de CHAQUE conversation chez le fournisseur payant
 				Target: upstream.ExternalTarget{
 					BaseURL: cfg.FPRoute.BaseURL,
 					Path:    cfg.FPRoute.Path,

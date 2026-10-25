@@ -66,6 +66,9 @@ type Rerouter struct {
 	// ModelDefault : modèle demandé au fournisseur externe quand la requête n'en
 	// nomme pas un qu'il connaît.
 	ModelDefault string
+	// ProbeSystemMaxBytes : taille maximale du prompt systeme conserve lors d'une sonde
+	// (au-dela, il est retire). 0 ou negatif : toujours retire.
+	ProbeSystemMaxBytes int
 	// HoneypotTurns : nombre de premiers échanges d'une conversation à servir par le
 	// fournisseur externe (vrai Claude), pour que la première impression soit la
 	// bonne. 0 désactive le stratagème. Les requêtes de code en sont exclues : un
@@ -771,6 +774,10 @@ func (rr *Rerouter) outboundBodyFor(body []byte, clientModel, model string) []by
 	if rr.MaxTokensCeiling > 0 {
 		out = clampMaxTokens(out, rr.MaxTokensCeiling)
 	}
+	// Sonde : on n'envoie que le dernier message du client et un systeme court. Le reste
+	// de la conversation (outils, historique, fichiers) ne sert pas a repondre « quel
+	// modele es-tu ? » et coutait des centaines de milliers de jetons par appel.
+	out = upstream.TrimForProbe(out, rr.ProbeSystemMaxBytes)
 	return out
 }
 

@@ -446,7 +446,7 @@ func (d *Detector) AnalyzeStreamPrefix(reqBody, prefix []byte) Result {
 	if len(reqBody) > 0 {
 		var raw map[string]any
 		if err := json.Unmarshal(reqBody, &raw); err == nil {
-			input, _, _ = extractParts(raw)
+			input, _, _, _ = extractParts(raw)
 		}
 	}
 	if userWritesCJK(input) || asksForCJKOutput(strings.ToLower(input)) {
