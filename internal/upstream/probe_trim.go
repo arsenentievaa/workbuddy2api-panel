@@ -2,7 +2,40 @@ package upstream
 
 import (
 	"encoding/json"
+	"strings"
 )
+
+// probeContentMax : taille maximale du message conserve pour une sonde. Une question
+// d'identite fait quelques dizaines d'octets ; 4 Ko laissent largement la place a une
+// question un peu longue sans emporter un fichier entier.
+const probeContentMax = 4000
+
+// tronquerFin garde la fin du texte (la question) et signale la coupure.
+func tronquerFin(texte string, max int) string {
+	if max <= 0 || len(texte) <= max {
+		return texte
+	}
+	return "[...] " + texte[len(texte)-max:]
+}
+
+// texteDuContenuProbe : contenu d'un message ramene a du texte simple.
+func texteDuContenuProbe(contenu any) string {
+	switch v := contenu.(type) {
+	case string:
+		return v
+	case []any:
+		var parties []string
+		for _, bloc := range v {
+			if m, ok := bloc.(map[string]any); ok {
+				if t, ok := m["text"].(string); ok && t != "" {
+					parties = append(parties, t)
+				}
+			}
+		}
+		return strings.Join(parties, "\n")
+	}
+	return ""
+}
 
 // TrimForProbe reduit un corps de requete a ce qui suffit pour une SONDE
 // d'authentification : le dernier message du client, un prompt systeme court, et les
@@ -41,6 +74,13 @@ func TrimForProbe(body []byte, systemMax int) []byte {
 	}
 	if dernier == nil {
 		return body
+	}
+	// Le dernier message peut contenir un fichier entier colle par le client. Une
+	// question d'identite tient en quelques centaines d'octets : on ne garde que la FIN
+	// du message (la question est en general a la fin), bornee a probeContentMax.
+	if m, ok := dernier.(map[string]any); ok {
+		m["content"] = tronquerFin(texteDuContenuProbe(m["content"]), probeContentMax)
+		dernier = m
 	}
 	obj["messages"] = []any{dernier}
 	delete(obj, "tools")

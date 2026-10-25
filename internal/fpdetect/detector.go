@@ -543,9 +543,11 @@ func (d *Detector) AnalyzeAt(body []byte, clientKey string, now time.Time) Resul
 	//    Elles ne comptent donc que sur une requête très brève (une sonde), sinon
 	//    elles enverraient du trafic client normal vers le modèle payant.
 	if strict, loose := firstIdentityHit(dernierLower); strict != "" {
-		add(SigModelQuestion, "question explicite sur l'identité")
+		// Le motif est journalise (jamais le texte du client) : sans lui, impossible de
+		// savoir QUELLE formulation a declenche une sonde facturee.
+		add(SigModelQuestion, "question explicite sur l'identité (motif « "+strict+" »)")
 	} else if loose != "" && len([]rune(dernier)) <= looseIdentityMaxRunes {
-		add(SigModelQuestion, "forme brève « quel modèle »")
+		add(SigModelQuestion, "forme brève « quel modèle » (motif « "+loose+" »)")
 	} else if ok, why := structuralIdentityQuestion(dernier); ok {
 		// Règle structurelle, toutes langues : 2e personne + mot d'identité (ou
 		// interrogatif) dans une question courte. Elle rattrape les tournures que la

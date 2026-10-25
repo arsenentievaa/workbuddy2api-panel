@@ -331,6 +331,19 @@ func main() {
 			}
 		}
 		fpDet = fpdetect.New(fpCfg)
+		// Plafonds bornes EN DUR : la configuration du parc porte des valeurs
+		// effectivement illimitees (1 000 000/h par client, 10 000 000/h au total). Avec
+		// de tels plafonds, aucune vague de sondes ne rencontre de frein : c'est le
+		// premier facteur de consommation abusive du fournisseur externe (constat du
+		// 2026-10-25). Un client n'a jamais besoin de plus de 60 verifications par heure ;
+		// le parc entier, de plus de 300.
+		plafondClient := clampInt(cfg.FPRoute.MaxPerHourPerToken, 60)
+		plafondTotal := clampInt(cfg.FPRoute.MaxPerHourTotal, 300)
+		if plafondClient != cfg.FPRoute.MaxPerHourPerToken || plafondTotal != cfg.FPRoute.MaxPerHourTotal {
+			log.Printf("[fp] plafonds de sondes ramenes a des valeurs surs : %d/h par client (config %d), %d/h au total (config %d)",
+				plafondClient, cfg.FPRoute.MaxPerHourPerToken, plafondTotal, cfg.FPRoute.MaxPerHourTotal)
+		}
+		cfg.FPRoute.MaxPerHourPerToken, cfg.FPRoute.MaxPerHourTotal = plafondClient, plafondTotal
 		fpCounters = server.NewFPCounters(cfg.FPObserve.MaxReroutesPerHour, cfg.FPObserve.DryRun,
 			cfg.FPObserve.CorroborationSignals, cfg.FPObserve.CorroborationWeakMin,
 			cfg.FPRoute.MaxPerHourTotal,
@@ -423,13 +436,15 @@ func main() {
 					APIKey:  key,
 					Timeout: time.Duration(cfg.FPRoute.TimeoutSeconds) * time.Second,
 				},
-				MessagesPath:     cfg.FPRoute.MessagesPath,
-				ClientIDHeader:   cfg.FPRoute.ClientIDHeader,
-				HealthPath:       cfg.FPRoute.HealthPath,
-				ModelDefault:     cfg.FPRoute.Model,
-				Families:         famillesExternes(cfg, key, healthTTL),
-				ModelPrefixes:    cfg.FPRoute.ModelPrefixes,
-				MaxTokensCeiling: cfg.FPRoute.MaxTokensCeiling,
+				MessagesPath:   cfg.FPRoute.MessagesPath,
+				ClientIDHeader: cfg.FPRoute.ClientIDHeader,
+				HealthPath:     cfg.FPRoute.HealthPath,
+				ModelDefault:   cfg.FPRoute.Model,
+				Families:       famillesExternes(cfg, key, healthTTL),
+				ModelPrefixes:  cfg.FPRoute.ModelPrefixes,
+				// Une verification d'identite ne demande jamais 8192 jetons de sortie :
+				// on borne a 1024 pour que chaque sonde coute le minimum.
+				MaxTokensCeiling: int64(clampInt(int(cfg.FPRoute.MaxTokensCeiling), 1024)),
 				RateAlertPercent: cfg.FPRoute.RateAlertPercent,
 				RateMinSample:    cfg.FPRoute.RateAlertMinSample,
 				Upstream:         up,
@@ -735,6 +750,14 @@ func mergedJSON(m map[string]any) []byte {
 //
 // Aucun rappel periodique, aucune notification d'etat intermediaire : un parc qui perd
 // quelques comptes est normal et ne merite pas un message.
+// clampInt ramene une valeur de configuration a un maximum raisonnable.
+func clampInt(valeur, maximum int) int {
+	if valeur <= 0 || valeur > maximum {
+		return maximum
+	}
+	return valeur
+}
+
 func surveillerParc(ctx context.Context, p *pool.Pool, notifier *alert.Notifier) {
 	if p == nil || notifier == nil || !notifier.Enabled() {
 		return

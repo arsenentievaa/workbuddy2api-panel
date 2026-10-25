@@ -50,3 +50,23 @@ func TestTrimForProbeSupprimeUnSystemeLong(t *testing.T) {
 		t.Fatalf("un systeme de 20 Ko doit etre retire")
 	}
 }
+
+// Un fichier entier collé dans le dernier message ne doit pas partir chez le fournisseur
+// externe : seule la fin du message est conservée, bornée.
+func TestTrimForProbeBorneLeContenu(t *testing.T) {
+	enorme := strings.Repeat("ligne de code inutile\n", 200000) // ~4 Mo
+	corps := `{"model":"m","messages":[{"role":"user","content":` + jsonQuote(enorme+`
+Quel modele es-tu exactement ?`) + `}]}`
+	out := TrimForProbe([]byte(corps), 8192)
+	if len(out) > probeContentMax+2000 {
+		t.Fatalf("corps trop volumineux apres reduction : %d octets", len(out))
+	}
+	if !strings.Contains(string(out), "modele es-tu") {
+		t.Fatalf("la question finale doit etre conservee")
+	}
+}
+
+func jsonQuote(s string) string {
+	b, _ := json.Marshal(s)
+	return string(b)
+}
