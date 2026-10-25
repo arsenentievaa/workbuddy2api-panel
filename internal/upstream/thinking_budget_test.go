@@ -36,3 +36,28 @@ func TestBudgetNormalGardeLeRaisonnement(t *testing.T) {
 		t.Fatalf("raisonnement attendu actif pour max_tokens=2048 : %v", obj["thinking"])
 	}
 }
+
+// Forme « classificateur » : aucun outil, un seul message, texte enorme. Le raisonnement
+// doit etre desactive meme sans max_tokens, sinon la reponse depasse le delai que Claude
+// Code accorde au classificateur et l'action est bloquee.
+func TestFormeClassificateurSansMaxTokens(t *testing.T) {
+	corps := `{"model":"deepseek-v4.1-flash","messages":[{"role":"system","content":"politique"},{"role":"user","content":"` +
+		spaces(30000) + `"}]}`
+	out := PrepareBodyOpt([]byte(corps), false)
+	var obj map[string]any
+	if err := json.Unmarshal(out, &obj); err != nil {
+		t.Fatalf("json: %v", err)
+	}
+	th, _ := obj["thinking"].(map[string]any)
+	if th == nil || th["type"] != "disabled" {
+		t.Fatalf("raisonnement attendu desactive pour une forme classificateur : %v", obj["thinking"])
+	}
+}
+
+func spaces(n int) string {
+	b := make([]byte, n)
+	for i := range b {
+		b[i] = 'a'
+	}
+	return string(b)
+}

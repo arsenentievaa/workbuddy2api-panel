@@ -12,6 +12,7 @@ import (
 	"log"
 	"net/http"
 	"net/url"
+	"os"
 	"regexp"
 	"sort"
 	"strconv"
@@ -813,6 +814,9 @@ func (c *Client) prepareBody(body []byte, realm, uid, conversationID string) []b
 	// prompt_cache_key 注入（P0 费用优化，费用降 ~17×）：按账号隔离的稳定缓存键，
 	// 让同一客户端对同一账号的连续请求命中上游前缀缓存。
 	body = InjectPromptCacheKey(body, uid, conversationID)
+	if debugPayloadShape() {
+		log.Printf("[payload] apres preparation: %s", bodyShape(body))
+	}
 	return body
 }
 
@@ -1975,4 +1979,39 @@ func IsAlreadyCheckin(err error) bool {
 
 func truncate(s string, n int) string {
 	return logfmt.Truncate(s, n)
+}
+
+// debugPayloadShape : journal detaille active par WB2A_DEBUG_PAYLOAD=1 (diagnostic).
+func debugPayloadShape() bool { return os.Getenv("WB2A_DEBUG_PAYLOAD") == "1" }
+
+// bodyShape decrit la forme du corps sortant sans en recopier le contenu.
+func bodyShape(body []byte) string {
+	var obj map[string]any
+	if err := json.Unmarshal(body, &obj); err != nil {
+		return "corps illisible"
+	}
+	msgs, _ := obj["messages"].([]any)
+	roles := make([]string, 0, len(msgs))
+	chars := 0
+	for _, m := range msgs {
+		msg, ok := m.(map[string]any)
+		if !ok {
+			continue
+		}
+		role, _ := msg["role"].(string)
+		roles = append(roles, role)
+		switch c := msg["content"].(type) {
+		case string:
+			chars += len(c)
+		case []any:
+			for _, b := range c {
+				if bm, ok := b.(map[string]any); ok {
+					if t, ok := bm["text"].(string); ok {
+						chars += len(t)
+					}
+				}
+			}
+		}
+	}
+	return fmt.Sprintf("msgs=%d roles=%v chars=%d max_tokens=%v stop=%v", len(msgs), roles, chars, obj["max_tokens"], obj["stop"] != nil)
 }

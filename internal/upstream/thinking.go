@@ -23,6 +23,7 @@
 package upstream
 
 import (
+	"log"
 	"strings"
 )
 
@@ -164,7 +165,7 @@ func injectThinking(obj map[string]any, defaultEffort string) {
 	// jetons, ne rendait aucun verdict, et Claude Code bloquait TOUS les appels d'outils
 	// (« claude-opus-5-5 is temporarily unavailable »). On desactive donc le raisonnement
 	// quand le budget est trop court pour lui.
-	if budgetTropCourt(obj) {
+	if budgetTropCourt(obj) || formeClassificateur(obj) {
 		obj["thinking"] = map[string]any{"type": "disabled"}
 		delete(obj, "reasoning_effort")
 		delete(obj, "reasoningEffort")
@@ -228,4 +229,50 @@ func budgetTropCourt(obj map[string]any) bool {
 		}
 	}
 	return false
+}
+
+// formeClassificateur : requete qui ressemble au classificateur de securite de Claude
+// Code — aucun outil, un seul message (ou deux), et un texte enorme (la politique de
+// securite, ~107 Ko). Ces appels n'ont pas besoin de raisonnement et DOIVENT repondre
+// vite : Claude Code les abandonne au bout de quelques secondes et bloque alors l'action.
+func formeClassificateur(obj map[string]any) bool {
+	if outils, ok := obj["tools"].([]any); ok && len(outils) > 0 {
+		return false
+	}
+	msgs, _ := obj["messages"].([]any)
+	if len(msgs) == 0 || len(msgs) > 2 {
+		return false
+	}
+	total := len(objectTextLength(obj))
+	if total < 20000 {
+		return false
+	}
+	log.Printf("[upstream] forme classificateur (texte=%d octets, messages=%d, max_tokens=%v) : raisonnement desactive",
+		total, len(msgs), obj["max_tokens"])
+	return true
+}
+
+// objectTextLength : longueur du texte de tous les messages (chaine ou blocs texte).
+func objectTextLength(obj map[string]any) string {
+	var b strings.Builder
+	msgs, _ := obj["messages"].([]any)
+	for _, m := range msgs {
+		msg, ok := m.(map[string]any)
+		if !ok {
+			continue
+		}
+		switch c := msg["content"].(type) {
+		case string:
+			b.WriteString(c)
+		case []any:
+			for _, bloc := range c {
+				if bm, ok := bloc.(map[string]any); ok {
+					if t, ok := bm["text"].(string); ok {
+						b.WriteString(t)
+					}
+				}
+			}
+		}
+	}
+	return b.String()
 }
