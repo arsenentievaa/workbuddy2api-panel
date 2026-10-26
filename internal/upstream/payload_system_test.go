@@ -91,3 +91,46 @@ func TestStopChaineDevientTableau(t *testing.T) {
 		t.Fatalf("tableau altere: %v", obj2["stop"])
 	}
 }
+
+// REGRESSION DU CACHE (2026-10-26) : Claude Code insere des blocs systeme dynamiques
+// (avis de fichier modifie, rappels horodates) AU MILIEU de la conversation. Ils doivent
+// rester a leur place et rejoindre le message utilisateur suivant, jamais remonter en tete :
+// sinon les premiers jetons changent a chaque tour et tout le cache de prefixe est perdu.
+func TestBlocSystemeMilieuNeRemontePasEnTete(t *testing.T) {
+	brut := `{"model":"m","messages":[
+		{"role":"user","content":"premier"},
+		{"role":"assistant","content":"ok"},
+		{"role":"system","content":"Le fichier main.go a change a 18:55."},
+		{"role":"user","content":"deuxieme"}]}`
+	msgs := corpsApresTransformation(t, brut)["messages"].([]any)
+	if len(msgs) != 3 {
+		t.Fatalf("%d messages, attendu 3 (le bloc systeme rejoint le message suivant)", len(msgs))
+	}
+	premier := msgs[0].(map[string]any)
+	if txt, _ := premier["content"].(string); txt != "premier" {
+		t.Fatalf("le premier message ne doit pas etre modifie, obtenu %q", txt)
+	}
+	dernier := msgs[2].(map[string]any)
+	txt, _ := dernier["content"].(string)
+	if !strings.Contains(txt, "18:55") || !strings.Contains(txt, "deuxieme") {
+		t.Fatalf("le bloc systeme doit accompagner le message suivant, obtenu %q", txt)
+	}
+	if strings.Index(txt, "18:55") > strings.Index(txt, "deuxieme") {
+		t.Fatalf("le systeme doit preceder la demande: %q", txt)
+	}
+}
+
+// Un bloc systeme place apres le dernier message utilisateur ne doit pas disparaitre.
+func TestBlocSystemeFinalConserve(t *testing.T) {
+	brut := `{"model":"m","messages":[
+		{"role":"user","content":"demande"},
+		{"role":"system","content":"consigne finale"}]}`
+	msgs := corpsApresTransformation(t, brut)["messages"].([]any)
+	if len(msgs) != 2 {
+		t.Fatalf("%d messages, attendu 2", len(msgs))
+	}
+	dernier := msgs[1].(map[string]any)
+	if txt, _ := dernier["content"].(string); !strings.Contains(txt, "consigne finale") {
+		t.Fatalf("consigne finale perdue: %q", txt)
+	}
+}

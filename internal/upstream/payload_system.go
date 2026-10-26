@@ -16,39 +16,42 @@ func mergeSystemIntoUser(obj map[string]any) {
 	if !ok || len(msgs) == 0 {
 		return
 	}
-	var systemes []string
-	restants := make([]any, 0, len(msgs))
+	// Chaque bloc systeme rejoint le PROCHAIN message utilisateur, a sa place.
+	//
+	// Pourquoi pas tout en tete : Claude Code insere des blocs systeme DYNAMIQUES au fil
+	// de la conversation (avis de fichier modifie, rappels horodates). Les remonter dans le
+	// premier message changeait les tout premiers jetons a chaque tour, ce qui invalidait
+	// la TOTALITE du cache de prefixe : le tour 2 relisait 640 jetons et refacturait 87 000
+	// (mesure du 2026-10-26). En les laissant a leur position, le prefixe des tours
+	// precedents reste identique et le cache est relu.
+	enAttente := make([]string, 0, 2)
+	sortie := make([]any, 0, len(msgs))
 	for _, m := range msgs {
 		msg, ok := m.(map[string]any)
 		if !ok {
-			restants = append(restants, m)
+			sortie = append(sortie, m)
 			continue
 		}
-		if role, _ := msg["role"].(string); strings.EqualFold(strings.TrimSpace(role), "system") {
+		role, _ := msg["role"].(string)
+		role = strings.TrimSpace(role)
+		if strings.EqualFold(role, "system") {
 			if txt := texteDuContenu(msg["content"]); txt != "" {
-				systemes = append(systemes, txt)
+				enAttente = append(enAttente, txt)
 			}
 			continue
 		}
-		restants = append(restants, m)
-	}
-	if len(systemes) == 0 {
-		return
-	}
-	prefixe := strings.Join(systemes, "\n\n")
-	for i, m := range restants {
-		msg, ok := m.(map[string]any)
-		if !ok {
-			continue
+		if strings.EqualFold(role, "user") && len(enAttente) > 0 {
+			msg["content"] = strings.Join(enAttente, "\n\n") + "\n\n" + texteDuContenu(msg["content"])
+			enAttente = enAttente[:0]
 		}
-		if role, _ := msg["role"].(string); strings.EqualFold(strings.TrimSpace(role), "user") {
-			msg["content"] = prefixe + "\n\n" + texteDuContenu(msg["content"])
-			restants[i] = msg
-			obj["messages"] = restants
-			return
-		}
+		sortie = append(sortie, msg)
 	}
-	obj["messages"] = append([]any{map[string]any{"role": "user", "content": prefixe}}, restants...)
+	// Systeme restant apres le dernier message utilisateur : un message utilisateur final,
+	// comme avant (aucun contenu perdu).
+	if len(enAttente) > 0 {
+		sortie = append(sortie, map[string]any{"role": "user", "content": strings.Join(enAttente, "\n\n")})
+	}
+	obj["messages"] = sortie
 }
 
 // texteDuContenu aplatit un contenu de message (chaine, ou blocs type text).
