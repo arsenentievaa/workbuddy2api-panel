@@ -798,7 +798,7 @@ func (c *Client) chatBase(a *auth.Auth) string {
 // prepareBody 组装出站请求体（脱敏开关由 Client.SanitizeFingerprints 控制）。
 // prepareBody 组装出站请求体（脱敏开关由 Client.SanitizeFingerprints 控制）。
 // realm 为账号 Realm()（cn/global），供 efforts 缓存分桶（跨域 effort 集合不互相污染）。
-func (c *Client) prepareBody(body []byte, realm, uid, conversationID string) []byte {
+func (c *Client) prepareBody(body []byte, realm, uid, conversationID, clientID string) []byte {
 	// PDF -> images : a placer AVANT toute autre reecriture. L'amont n'accepte aucun
 	// bloc document (4 formes testees, 4 rejets le 2026-10-16) alors qu'une image passe :
 	// un PDF joint est converti en une image par page et remplace le bloc d'origine.
@@ -818,7 +818,8 @@ func (c *Client) prepareBody(body []byte, realm, uid, conversationID string) []b
 	if debugPayloadShape() {
 		// uid = compte amont choisi : deux tours d'une meme conversation doivent le meme
 		// compte, sinon le cache de prefixe est perdu (constat mbuz, 2026-10-26).
-		log.Printf("[payload] compte=%s conversation=%s %s", tronque(uid, 10), tronque(conversationID, 16), bodyShape(body))
+		log.Printf("[payload] client=%s compte=%s conversation=%s %s",
+			tronque(clientID, 24), tronque(uid, 10), tronque(conversationID, 16), bodyShape(body))
 	}
 	return body
 }
@@ -1043,7 +1044,7 @@ func (c *Client) ChatStreamContext(ctx context.Context, a *auth.Auth, body []byt
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	prepared := c.prepareBody(body, a.Realm(), a.UID, meta.ConversationID)
+	prepared := c.prepareBody(body, a.Realm(), a.UID, meta.ConversationID, meta.ClientID)
 	if c.globalOn(a) {
 		prepared = ensureConsoleSystem(prepared)
 	}

@@ -188,6 +188,7 @@ type ChatMeta struct {
 	ConversationID        string // X-Conversation-ID：body 提取的入站值，空则不发（透传优先，不伪造）
 	ConversationRequestID string // X-Conversation-Request-ID / X-Root-Request-ID：聚合主键，必发
 	TraceID               string // X-Trace-ID：入站透传值，空则回落 conversationRequestID
+	ClientID              string // X-Client-Id：identifiant d'appel (lumia-token-<id>), pour le diagnostic
 }
 
 // ChatHeaders 在 common 之上加 chat 专属的账号头。
