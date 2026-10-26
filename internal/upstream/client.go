@@ -816,7 +816,9 @@ func (c *Client) prepareBody(body []byte, realm, uid, conversationID string) []b
 	// 让同一客户端对同一账号的连续请求命中上游前缀缓存。
 	body = InjectPromptCacheKey(body, uid, conversationID)
 	if debugPayloadShape() {
-		log.Printf("[payload] apres preparation: %s", bodyShape(body))
+		// uid = compte amont choisi : deux tours d'une meme conversation doivent le meme
+		// compte, sinon le cache de prefixe est perdu (constat mbuz, 2026-10-26).
+		log.Printf("[payload] compte=%s conversation=%s %s", tronque(uid, 10), tronque(conversationID, 16), bodyShape(body))
 	}
 	return body
 }
@@ -2024,4 +2026,12 @@ func bodyShape(body []byte) string {
 	}
 	return fmt.Sprintf("msgs=%d roles=%v chars=%d texte=%d prefixe=%x total=%x max_tokens=%v stop=%v",
 		len(msgs), roles, chars, len(texte), sha1.Sum([]byte(prefixe)), sha1.Sum([]byte(texte)), obj["max_tokens"], obj["stop"] != nil)
+}
+
+// tronque : debut d'une chaine, sans jamais journaliser de secret entier.
+func tronque(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[:n] + "..."
 }
