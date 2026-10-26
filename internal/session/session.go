@@ -404,6 +404,12 @@ func deriveKey(obj map[string]any) string {
 		return ""
 	}
 	systemText, firstUserText := "", ""
+	// Seul le systeme de TETE compte. Claude Code insere des blocs systeme dynamiques au
+	// milieu de la conversation (avis de fichier modifie, rappels horodates) : les prendre
+	// en compte changeait la cle de session d'un tour a l'autre, donc le compte amont, donc
+	// le cache de prefixe (mesure du 2026-10-26 : deux comptes differents pour deux tours
+	// dont le prefixe etait identique).
+	dejaVuUtilisateur := false
 	for _, m := range msgs {
 		msg, ok := m.(map[string]any)
 		if !ok {
@@ -412,10 +418,11 @@ func deriveKey(obj map[string]any) string {
 		text := messageText(msg["content"])
 		switch strOrEmpty(msg["role"]) {
 		case "system", "developer":
-			if systemText == "" {
+			if !dejaVuUtilisateur && systemText == "" {
 				systemText = text
 			}
 		case "user":
+			dejaVuUtilisateur = true
 			if firstUserText == "" {
 				// 首条 user 用内容签名（ids.go contentSignature）而非纯文本提取：
 				// 纯图片轮（无 text part）在 messageText 下恒空串 → 派生键失效

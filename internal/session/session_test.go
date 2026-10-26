@@ -393,3 +393,25 @@ func TestExtractKeyJamaisVidePourUneConversation(t *testing.T) {
 		}
 	}
 }
+
+// Un bloc systeme dynamique au milieu de la conversation (Claude Code en insere a chaque
+// tour) ne doit pas changer la cle de session : sinon le tour part sur un autre compte
+// amont et le cache de prefixe est perdu.
+func TestCleSessionInsensibleAuSystemeTardif(t *testing.T) {
+	turn1 := `{"messages":[{"role":"user","content":"Analyse le projet."}]}`
+	turn2 := `{"messages":[{"role":"user","content":"Analyse le projet."},{"role":"assistant","content":"ok"},
+		{"role":"system","content":"main.go a change a 19:10."},{"role":"user","content":"Suite."}]}`
+	k1, k2 := ExtractKey([]byte(turn1)), ExtractKey([]byte(turn2))
+	if k1 == "" || k1 != k2 {
+		t.Fatalf("la cle doit rester stable malgre le bloc systeme tardif : %q / %q", k1, k2)
+	}
+}
+
+// Le systeme de tete, lui, doit continuer de distinguer deux conversations.
+func TestCleSessionDistingueParSystemeDeTete(t *testing.T) {
+	a := `{"messages":[{"role":"system","content":"Tu es un agent de code."},{"role":"user","content":"Bonjour."}]}`
+	b := `{"messages":[{"role":"system","content":"Tu es un redacteur."},{"role":"user","content":"Bonjour."}]}`
+	if ExtractKey([]byte(a)) == ExtractKey([]byte(b)) {
+		t.Fatal("deux systemes de tete differents doivent produire deux cles")
+	}
+}
