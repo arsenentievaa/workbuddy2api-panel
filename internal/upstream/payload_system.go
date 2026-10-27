@@ -16,42 +16,66 @@ func mergeSystemIntoUser(obj map[string]any) {
 	if !ok || len(msgs) == 0 {
 		return
 	}
-	// Chaque bloc systeme rejoint le PROCHAIN message utilisateur, a sa place.
+	// Tout le systeme part dans le DERNIER message utilisateur.
 	//
-	// Pourquoi pas tout en tete : Claude Code insere des blocs systeme DYNAMIQUES au fil
-	// de la conversation (avis de fichier modifie, rappels horodates). Les remonter dans le
-	// premier message changeait les tout premiers jetons a chaque tour, ce qui invalidait
-	// la TOTALITE du cache de prefixe : le tour 2 relisait 640 jetons et refacturait 87 000
-	// (mesure du 2026-10-26). En les laissant a leur position, le prefixe des tours
-	// precedents reste identique et le cache est relu.
-	enAttente := make([]string, 0, 2)
-	sortie := make([]any, 0, len(msgs))
+	// Historique : pour que l'amont en tienne compte, on le transportait dans le PREMIER
+	// message utilisateur. Or Claude Code fait varier une partie de son prompt systeme a
+	// chaque tour (heure, budget de jetons, etat du depot). Place en tete, ce contenu
+	// volatil invalide la totalite du cache de prefixe : constat du 2026-10-27 chez deux
+	// clients, seulement ~2 200 jetons relus (les definitions d'outils) et ~52 000
+	// refactures a chaque tour.
+	//
+	// En le portant par le dernier message, l'historique des tours precedents reste
+	// identique et le cache est relu ; les consignes arrivent juste avant la demande.
+	var systemes []string
+	dernierUtilisateur := -1
 	for _, m := range msgs {
 		msg, ok := m.(map[string]any)
 		if !ok {
-			sortie = append(sortie, m)
 			continue
 		}
 		role, _ := msg["role"].(string)
-		role = strings.TrimSpace(role)
-		if strings.EqualFold(role, "system") {
+		switch strings.ToLower(strings.TrimSpace(role)) {
+		case "system", "developer":
 			if txt := texteDuContenu(msg["content"]); txt != "" {
-				enAttente = append(enAttente, txt)
+				systemes = append(systemes, txt)
 			}
+		case "user":
+			dernierUtilisateur = len(msgs) - 1 // recalcule plus bas
+		}
+	}
+	sansSysteme := make([]any, 0, len(msgs))
+	for _, m := range msgs {
+		msg, ok := m.(map[string]any)
+		if !ok {
+			sansSysteme = append(sansSysteme, m)
 			continue
 		}
-		if strings.EqualFold(role, "user") && len(enAttente) > 0 {
-			msg["content"] = strings.Join(enAttente, "\n\n") + "\n\n" + texteDuContenu(msg["content"])
-			enAttente = enAttente[:0]
+		role, _ := msg["role"].(string)
+		if strings.EqualFold(strings.TrimSpace(role), "system") || strings.EqualFold(strings.TrimSpace(role), "developer") {
+			continue
 		}
-		sortie = append(sortie, msg)
+		sansSysteme = append(sansSysteme, msg)
 	}
-	// Systeme restant apres le dernier message utilisateur : un message utilisateur final,
-	// comme avant (aucun contenu perdu).
-	if len(enAttente) > 0 {
-		sortie = append(sortie, map[string]any{"role": "user", "content": strings.Join(enAttente, "\n\n")})
+	if len(systemes) == 0 {
+		return
 	}
-	obj["messages"] = sortie
+	prefixe := strings.Join(systemes, "\n\n")
+	// dernier message utilisateur de la liste nettoyee
+	for i := len(sansSysteme) - 1; i >= 0; i-- {
+		msg, ok := sansSysteme[i].(map[string]any)
+		if !ok {
+			continue
+		}
+		if role, _ := msg["role"].(string); strings.EqualFold(strings.TrimSpace(role), "user") {
+			msg["content"] = prefixe + "\n\n" + texteDuContenu(msg["content"])
+			sansSysteme[i] = msg
+			obj["messages"] = sansSysteme
+			return
+		}
+	}
+	obj["messages"] = append([]any{map[string]any{"role": "user", "content": prefixe}}, sansSysteme...)
+	_ = dernierUtilisateur
 }
 
 // texteDuContenu aplatit un contenu de message (chaine, ou blocs type text).

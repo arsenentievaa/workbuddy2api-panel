@@ -19,8 +19,9 @@ func corpsApresTransformation(t *testing.T, brut string) map[string]any {
 	return obj
 }
 
-// Le systeme doit arriver dans le premier message utilisateur, sinon l'amont l'ignore.
-func TestSystemeFusionneDansPremierMessageUtilisateur(t *testing.T) {
+// Le systeme doit arriver dans le dernier message utilisateur (voir la note dans
+// payload_system.go : place en tete, son contenu volatil invalidait tout le cache).
+func TestSystemeFusionneDansDernierMessageUtilisateur(t *testing.T) {
 	obj := corpsApresTransformation(t, `{"model":"m","messages":[
 		{"role":"system","content":"Tu reponds uniquement par PINEAPPLE."},
 		{"role":"user","content":"Bonjour"}]}`)
@@ -126,10 +127,10 @@ func TestBlocSystemeFinalConserve(t *testing.T) {
 		{"role":"user","content":"demande"},
 		{"role":"system","content":"consigne finale"}]}`
 	msgs := corpsApresTransformation(t, brut)["messages"].([]any)
-	if len(msgs) != 2 {
-		t.Fatalf("%d messages, attendu 2", len(msgs))
+	if len(msgs) != 1 {
+		t.Fatalf("%d messages, attendu 1 (le systeme rejoint la demande)", len(msgs))
 	}
-	dernier := msgs[1].(map[string]any)
+	dernier := msgs[0].(map[string]any)
 	if txt, _ := dernier["content"].(string); !strings.Contains(txt, "consigne finale") {
 		t.Fatalf("consigne finale perdue: %q", txt)
 	}
