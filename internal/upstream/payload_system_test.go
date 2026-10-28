@@ -134,3 +134,20 @@ func TestBlocSystemeFinalConserve(t *testing.T) {
 		t.Fatalf("consigne finale perdue: %q", txt)
 	}
 }
+
+// Claude Code place une ligne d'attribution dont les valeurs changent a chaque requete en
+// tete de son prompt systeme. Si elle part vers un amont a cache de prefixe implicite, tout
+// le cache est invalide a chaque tour (mesure du 2026-10-28). Elle doit disparaitre.
+func TestEnteteAttributionRetire(t *testing.T) {
+	obj := corpsApresTransformation(t, `{"model":"m","messages":[
+		{"role":"system","content":"x-anthropic-billing-header: cc_version=2.1.311; cc_entrypoint=cli; cc_turn_index=7;\nTu es Claude Code."},
+		{"role":"user","content":"Bonjour"}]}`)
+	msgs := obj["messages"].([]any)
+	txt := msgs[0].(map[string]any)["content"].(string)
+	if strings.Contains(txt, "x-anthropic-billing-header") {
+		t.Fatalf("entete d'attribution encore presente: %q", txt)
+	}
+	if !strings.Contains(txt, "Tu es Claude Code") {
+		t.Fatalf("le reste du prompt systeme doit etre conserve: %q", txt)
+	}
+}

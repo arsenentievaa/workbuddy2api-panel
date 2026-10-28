@@ -35,7 +35,7 @@ func mergeSystemIntoUser(obj map[string]any) {
 		role, _ := msg["role"].(string)
 		role = strings.TrimSpace(role)
 		if strings.EqualFold(role, "system") {
-			if txt := texteDuContenu(msg["content"]); txt != "" {
+			if txt := sansEnteteAttribution(texteDuContenu(msg["content"])); txt != "" {
 				enAttente = append(enAttente, txt)
 			}
 			continue
@@ -76,4 +76,29 @@ func texteDuContenu(contenu any) string {
 		return strings.Join(parties, "\n\n")
 	}
 	return ""
+}
+
+// sansEnteteAttribution retire la ligne d'attribution que Claude Code met en tete de son
+// prompt systeme : « x-anthropic-billing-header: cc_version=…; cc_entrypoint=cli;
+// cc_prompt_index=…; cc_turn_index=…; … ». Ses valeurs changent a CHAQUE requete.
+//
+// POURQUOI : nos amonts font du cache de prefixe implicite (seuls les premiers jetons
+// strictement identiques sont reutilises). Cette ligne, placee en tete du prompt, invalidait
+// donc tout le cache a chaque tour. Mesure du 2026-10-28 : deux requetes identiques a cette
+// ligne pres -> 0 jeton relu ; sans la ligne, le second tour relit 99,8 % du contexte.
+// Anthropic ne s'en sert pas pour l'inference (attribution de facturation uniquement) et
+// propose meme une option pour la desactiver : la retirer ne change rien pour le modele.
+func sansEnteteAttribution(texte string) string {
+	if !strings.Contains(texte, "x-anthropic-billing-header") {
+		return texte
+	}
+	lignes := strings.Split(texte, "\n")
+	filtrees := make([]string, 0, len(lignes))
+	for _, ligne := range lignes {
+		if strings.HasPrefix(strings.TrimSpace(ligne), "x-anthropic-billing-header") {
+			continue
+		}
+		filtrees = append(filtrees, ligne)
+	}
+	return strings.TrimLeft(strings.Join(filtrees, "\n"), "\n")
 }
