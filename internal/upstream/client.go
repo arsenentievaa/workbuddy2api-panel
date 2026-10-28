@@ -2031,7 +2031,21 @@ func bodyShape(body []byte) string {
 	if len(prefixe) > 40000 {
 		prefixe = prefixe[:40000]
 	}
-	return fmt.Sprintf("msgs=%d roles=%v chars=%d texte=%d prefixe=%x total=%x max_tokens=%v stop=%v",
+	// Empreinte par message (un sur 25) : permet de reperer, entre deux tours, le PREMIER
+	// message qui differe — donc quelle partie de l'historique est reecrite par le client.
+	var sig strings.Builder
+	for i, m := range msgs {
+		if i%25 != 0 && i != 1 && i != len(msgs)-1 {
+			continue
+		}
+		brut, err := json.Marshal(m)
+		if err != nil {
+			continue
+		}
+		somme := sha1.Sum(brut)
+		fmt.Fprintf(&sig, "%d:%x,", i, somme[:4])
+	}
+	return fmt.Sprintf("sig=%s msgs=%d roles=%v chars=%d texte=%d prefixe=%x total=%x max_tokens=%v stop=%v", sig.String(),
 		len(msgs), roles, chars, len(texte), sha1.Sum([]byte(prefixe)), sha1.Sum([]byte(texte)), obj["max_tokens"], obj["stop"] != nil)
 }
 
