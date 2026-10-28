@@ -120,6 +120,12 @@ var hardMarkers = []string{
 	"insufficient credit", "no credit", "credit exhausted", "credits exhausted", "out of credit",
 	"quota exceeded", "quota exhaust", "payment required", "credit not enough",
 	"not enough credit",
+	// Constat du 2026-10-28 : un compte amont epuise repond 403
+	// « Insufficient account balance » ; sans ces formulations le refus etait transmis au
+	// client (« 403 Insufficient account balance », que Claude Code affiche comme un
+	// probleme de connexion) au lieu de mettre le compte en quarantaine et d'en essayer un autre.
+	"insufficient account balance", "insufficient balance", "account balance is insufficient",
+	"insufficient account credits", "account credits exhausted",
 	"积分不足", "额度不足", "余额不足", "积分用完", "额度用尽", "没有积分",
 }
 

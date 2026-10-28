@@ -622,3 +622,19 @@ func TestFetchModelsOverlaysV3ConfigCapabilities(t *testing.T) {
 		t.Errorf("Efforts=%v want low,high,max", mi.Efforts)
 	}
 }
+
+// Un compte amont sans solde repond 403 « Insufficient account balance » : ce refus doit
+// etre classe comme une panne de compte (quarantaine + rotation), jamais transmis au client
+// qui le lit comme un probleme de connexion (constat du 2026-10-28).
+func TestClassifySoldeAmontInsuffisant(t *testing.T) {
+	cas := []string{
+		`{"code":14018,"msg":"Insufficient account balance"}`,
+		`{"msg":"insufficient account balance"}`,
+		`{"msg":"Insufficient balance"}`,
+	}
+	for _, corps := range cas {
+		if got := Classify(403, corps); got != ErrHardCredit {
+			t.Errorf("Classify(403, %s) = %v, attendu ErrHardCredit", corps, got)
+		}
+	}
+}
