@@ -48,4 +48,6 @@ COPY config.example.json /app/config.json
 EXPOSE 7863
 HEALTHCHECK --interval=30s --timeout=5s --start-period=5s \
   CMD wget -qO- http://127.0.0.1:7863/healthz || exit 1
-ENTRYPOINT ["/app/wb2api", "-config", "/app/config.json"]
+# La configuration peut vivre hors de l'image (volume persistant) : WB2A_CONFIG pointe le
+# fichier a charger. Sans cette variable, comportement inchange (/app/config.json).
+ENTRYPOINT ["/bin/sh", "-c", "exec /app/wb2api -config \"${WB2A_CONFIG:-/app/config.json}\""]
