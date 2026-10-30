@@ -151,3 +151,44 @@ func TestEnteteAttributionRetire(t *testing.T) {
 		t.Fatalf("le reste du prompt systeme doit etre conserve: %q", txt)
 	}
 }
+
+// Un message utilisateur multimodal ne doit pas perdre ses blocs image quand on y
+// fusionne le systeme (bug du 2026-10-30 : les images n'arrivaient jamais au modele).
+func TestFusionSystemeConserveLesImages(t *testing.T) {
+	corps := []byte(`{"model":"claude-sonnet-5","messages":[
+		{"role":"system","content":"Tu es un assistant."},
+		{"role":"user","content":[
+			{"type":"text","text":"Quelle couleur ?"},
+			{"type":"image_url","image_url":{"url":"data:image/png;base64,AAAA"}}
+		]}
+	]}`)
+	sortie := PrepareBodyOpt(corps, true)
+	var obj map[string]any
+	if err := json.Unmarshal(sortie, &obj); err != nil {
+		t.Fatalf("sortie illisible: %v", err)
+	}
+	msgs, _ := obj["messages"].([]any)
+	if len(msgs) != 1 {
+		t.Fatalf("un seul message attendu, obtenu %d", len(msgs))
+	}
+	msg, _ := msgs[0].(map[string]any)
+	blocs, ok := msg["content"].([]any)
+	if !ok {
+		t.Fatalf("le contenu multimodal a ete aplati en texte: %#v", msg["content"])
+	}
+	var image, texte bool
+	for _, b := range blocs {
+		m, _ := b.(map[string]any)
+		switch m["type"] {
+		case "image_url":
+			image = true
+		case "text":
+			if s, _ := m["text"].(string); strings.Contains(s, "Tu es un assistant") {
+				texte = true
+			}
+		}
+	}
+	if !image || !texte {
+		t.Fatalf("blocs attendus texte+image, obtenu %#v", blocs)
+	}
+}

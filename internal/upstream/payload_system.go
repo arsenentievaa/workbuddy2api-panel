@@ -41,7 +41,7 @@ func mergeSystemIntoUser(obj map[string]any) {
 			continue
 		}
 		if strings.EqualFold(role, "user") && len(enAttente) > 0 {
-			msg["content"] = strings.Join(enAttente, "\n\n") + "\n\n" + texteDuContenu(msg["content"])
+			msg["content"] = prefixerTexte(enAttente, msg["content"])
 			enAttente = enAttente[:0]
 		}
 		sortie = append(sortie, msg)
@@ -52,6 +52,27 @@ func mergeSystemIntoUser(obj map[string]any) {
 		sortie = append(sortie, map[string]any{"role": "user", "content": strings.Join(enAttente, "\n\n")})
 	}
 	obj["messages"] = sortie
+}
+
+// prefixerTexte ajoute du texte en tete d'un contenu SANS ecraser les blocs multimodaux.
+//
+// POURQUOI : la fusion du systeme dans le message utilisateur passait par
+// texteDuContenu(), qui aplatit le contenu en texte et jette donc les blocs image_url.
+// Comme notre application envoie TOUJOURS un message systeme, les images des clients
+// n'arrivaient jamais au modele (signale le 2026-10-30 : « I can't see an image — none
+// was attached »). On insere desormais un bloc texte en tete et on conserve la suite.
+func prefixerTexte(textes []string, contenu any) any {
+	texte := strings.Join(textes, "\n\n")
+	switch v := contenu.(type) {
+	case string:
+		return texte + "\n\n" + v
+	case []any:
+		sortie := make([]any, 0, len(v)+1)
+		sortie = append(sortie, map[string]any{"type": "text", "text": texte + "\n\n"})
+		return append(sortie, v...)
+	default:
+		return texte + "\n\n" + texteDuContenu(contenu)
+	}
 }
 
 // texteDuContenu aplatit un contenu de message (chaine, ou blocs type text).
